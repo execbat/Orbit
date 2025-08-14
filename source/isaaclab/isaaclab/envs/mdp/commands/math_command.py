@@ -83,21 +83,23 @@ class UniformVectorCommand(CommandTerm):
         if len(env_ids) == 0:
             return
 
-        # инициальная поза (shape (dim,)) и текущий масштаб-куррикулум (скаляр)
-        init_pose = self._env.JOINT_INIT_POS_NORM.to(self.device)      # (dim,)
-        scale     = float(self._env.MIANDER_SCALE)
+#        # инициальная поза (shape (dim,)) и текущий масштаб-куррикулум (скаляр)
+#        init_pose = self._env.JOINT_INIT_POS_NORM.to(self.device)      # (dim,)
+#        scale     = float(self._env.MIANDER_SCALE)
+#
+#        low  = init_pose - scale
+#        high = init_pose + scale
+#
+#        # случайный U(low, high) для каждого env и каждой DoF
+#        r = torch.rand((len(env_ids), self.dim), device=self.device)
+#        self._command[env_ids] = r * (high - low) + low
+#        # при желании обрезаем до [-1,1]
+#        x = r * (high - low) + low
+#        x = torch.clamp(x, -1.0, 1.0)
+#        self._command[env_ids] = x
+#        # self._command[env_ids].clamp_(-1.0, 1.0)
+        self._command[env_ids] = 2.0 * torch.rand((len(env_ids), self.dim), device=self.device) - 1.0
 
-        low  = init_pose - scale
-        high = init_pose + scale
-
-        # случайный U(low, high) для каждого env и каждой DoF
-        r = torch.rand((len(env_ids), self.dim), device=self.device)
-        self._command[env_ids] = r * (high - low) + low
-        # при желании обрезаем до [-1,1]
-        x = r * (high - low) + low
-        x = torch.clamp(x, -1.0, 1.0)
-        self._command[env_ids] = x
-        # self._command[env_ids].clamp_(-1.0, 1.0)
 
     def _update_command(self):
         """Между шагами ничего не меняем – команда постоянна."""

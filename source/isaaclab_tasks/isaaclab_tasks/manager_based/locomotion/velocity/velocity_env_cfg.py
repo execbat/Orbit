@@ -473,14 +473,14 @@ class MathRewardsCfg:
 
     # -- task
     # reward for following target axis values with axis_mask == 1 # AnumalMath
-    miander_tracking_reward = RewTerm(func=mdp.miander_tracking_reward, weight=10.0)
+    miander_tracking_reward = RewTerm(func=mdp.miander_tracking_reward, weight=5.0)
     # reward for following init axis values with axis_mask == 0 # AnumalMath
     miander_untracking_reward = RewTerm(func=mdp.miander_untracking_reward, weight=2.0)
     
     # 1) прогресс к цели по маскированным суставам
     masked_progress = RewTerm(
         func=mdp.masked_progress_reward,
-        weight=10.0,                      # попробуй 2.0–4.0
+        weight=5.0,                      # попробуй 2.0–4.0
         params={}                        # опционально: {"eps": 0.02}
     )
     
@@ -711,13 +711,13 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return min(0.3, 0.05 + self.stage / 50000.0)
+        return min(0.5, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0
 
     def get_miander_scale(self) -> float:
-        return min(1.0, 0.1 + self.stage / 5000.0)
+        return 1.0 # min(1.0, 0.1 + self.stage / 5000.0)
 
     # --- внутренняя утилита: выставить start_step так, чтобы сейчас была ровно target_stage ---
     def _align_start_to_now(self, current_step: int, target_stage: int) -> None:
