@@ -1,4 +1,4 @@
-![Isaac Lab](docs/source/_static/isaaclab.jpg)
+![Isaac Lab](Isaaс AnimalMath project.png)
 
 # Isaac Lab — **execbat** Contributor Build (Unitree G1 23-DOF Ballet Teleop)
 
