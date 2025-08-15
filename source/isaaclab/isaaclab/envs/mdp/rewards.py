@@ -710,4 +710,63 @@ def lateral_slip_penalty(env, command_name="base_velocity"):
     dir = cmd[:,:2] / mag
     # поперечная составляющая
     lat = v_b - (v_b*dir).sum(dim=1, keepdim=True)*dir
-    return lat.norm(dim=1)    # положительное число        
+    return lat.norm(dim=1)    # положительное число   
+    
+def com_over_support_reward_fast(
+    env,
+    sensor_cfg: SceneEntityCfg,                 # ContactSensor с телами-опорами (обычно стопы)
+    asset_cfg : SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_force_threshold: float = 5.0,       # Н: фильтр шума
+    sigma: float = 0.06,                        # м: «радиус точности» (строгость)
+    weighted: bool = True,                      # True → средняя точка взвешена силой
+) -> torch.Tensor:
+    """
+    R ∈ [0,1] (shape: [N]). Максимум, когда проекция CoM в XY совпадает с
+    опорной точкой (средней/взвешенной) по контактирующим телам из sensor_cfg.
+    """
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+    cs     = env.scene.sensors[sensor_cfg.name]
+
+    # ---------- контакты (N,K) ----------
+    # net_forces_w_history: [N, hist, B, 3] → по выбранным body_ids и max по истории
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,K)
+    contacts = fmag > contact_force_threshold                                                    # (N,K)
+    any_contact = contacts.any(dim=1)                                                            # (N,)
+
+    # ---------- опорная точка XY (N,2) ----------
+    feet_xy = robot.data.body_pos_w[:, sensor_cfg.body_ids, :2]                                  # (N,K,2)
+
+    if weighted:
+        w = (fmag * contacts.float())                                                            # (N,K)
+        w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        support_xy = (feet_xy * w.unsqueeze(-1)).sum(dim=1)                                     # (N,2)
+    else:
+        m = contacts.float()
+        support_xy = (feet_xy * m.unsqueeze(-1)).sum(dim=1) / m.sum(dim=1, keepdim=True).clamp_min(1e-6)
+
+    # ---------- центр масс XY (N,2) ----------
+    # если доступен com_pos_w — используем его (самый быстрый путь)
+    if hasattr(robot.data, "com_pos_w"):
+        com_xy = robot.data.com_pos_w[:, :2]
+    else:
+        # fallback: по массам тел
+        pos_w = robot.data.body_pos_w[:, :, :2]                                                  # (N,B,2)
+        masses = None
+        for attr in ("body_masses", "link_masses", "masses"):
+            if hasattr(robot.data, attr):
+                masses = getattr(robot.data, attr)                                               # (N,B)
+                break
+        if masses is None:
+            com_xy = pos_w.mean(dim=1)                                                           # грубо, без масс
+        else:
+            m = masses.unsqueeze(-1)                                                             # (N,B,1)
+            com_xy = (pos_w * m).sum(dim=1) / m.sum(dim=1).clamp_min(1e-6)                      # (N,2)
+
+    # ---------- награда ----------
+    d2 = (com_xy - support_xy).square().sum(dim=1)                                               # (N,)
+    inv_two_sigma2 = 0.5 / (sigma * sigma)
+    reward = torch.exp(-d2 * inv_two_sigma2)                                                     # (N,)
+    return torch.where(any_contact, reward, torch.zeros_like(reward))
+    
+         

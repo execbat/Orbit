@@ -322,7 +322,8 @@ class MathG1RoughEnvCfg(MathLocomotionVelocityRoughEnvCfg):
         self.commands.base_velocity.ranges.ang_vel_z = (-1.0, 1.0)
 
         # terminations
-        self.terminations.base_contact.params["sensor_cfg"].body_names = ["torso_link", "pelvis", ".*_hip_.*", ".*_wrist_.*", ".*shoulder_.*", ".*knee_.*", ".*elbow_.*"]
+        # self.terminations.base_contact.params["sensor_cfg"].body_names = ["torso_link", "pelvis", ".*_hip_.*", ".*_wrist_.*", ".*shoulder_.*", ".*knee_.*", ".*elbow_.*"]
+        self.terminations.base_contact.params["sensor_cfg"].body_names = ["torso_link", "pelvis", ".*_hip_.*", ".*knee_.*", ".*elbow_.*"]
         
     def get_metrics(self) -> dict:
         metrics = {}
@@ -377,7 +378,7 @@ class MathTeleopG1RoughEnvCfg_PLAY(MathTeleopLocomotionVelocityRoughEnvCfg):
         # )
         
         # terminations
-        self.terminations.base_contact.params["sensor_cfg"].body_names = ["torso_link", "pelvis", ".*_hip_.*", ".*_wrist_.*", ".*shoulder_.*", ".*knee_.*", ".*elbow_.*"]	
+        self.terminations.base_contact.params["sensor_cfg"].body_names = ["torso_link", "pelvis"]	
 
         # Commands
         self.commands.base_velocity.ranges.lin_vel_x = (0.0, 2.0)

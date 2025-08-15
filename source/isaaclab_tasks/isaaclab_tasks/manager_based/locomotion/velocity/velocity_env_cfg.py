@@ -492,7 +492,7 @@ class MathRewardsCfg:
     )
         
     pelvis_height_target_reward = RewTerm(
-        func=mdp.pelvis_height_target_reward, weight=3.0)
+        func=mdp.pelvis_height_target_reward, weight=1.0)
         
         
     # -- penalties
@@ -507,8 +507,8 @@ class MathRewardsCfg:
         func=mdp.undesired_contacts,
         weight=-0.5,
         #params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), "threshold": 1.0},
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[ ".*elbow_.*", ".*knee_.*", "torso_link", ".*_wrist_.*", "pelvis"]),
-         "threshold": 2.0}
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[ "torso_link", "pelvis", ".*_hip_.*", ".*_wrist_.*", ".*shoulder_.*", ".*knee_.*", ".*elbow_.*"]),
+        "threshold": 2.0}
     )
     
     feet_slide = RewTerm(
@@ -557,7 +557,7 @@ class MathRewardsCfg:
             "beta_cross": 6.0,
 
             "w_sep": 1.0,
-            "shoulder_width": 0.35,
+            "shoulder_width": 0.2,
             "beta_sep": 2.0,
         },
     )
@@ -596,6 +596,21 @@ class MathRewardsCfg:
         params={"command_name": "base_velocity"}
     )
     
+    com_over_support = RewTerm(
+        func=mdp.com_over_support_reward_fast,
+        weight=1.0,   # >0, это РЕВАРД
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # ваши опоры
+            ),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "contact_force_threshold": 5.0,   # чуть выше шума
+            "sigma": 0.06,                    # 4–8 см обычно хорошо
+            "weighted": True,                 # опора ближе к более нагруженной ноге
+        },
+    )
+    
 @configclass
 class MathTeleopRewardsCfg:
     # -- task
@@ -615,6 +630,14 @@ class TerminationsCfg:
     base_contact = DoneTerm(
         func=mdp.illegal_contact,
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names="base"), "threshold": 1.0},
+    )
+    
+    root_too_low = DoneTerm(
+        func=mdp.root_height_below_minimum,
+        params={
+            "minimum_height": 0.40,                 # порог по высоте, м
+            "asset_cfg": SceneEntityCfg("robot"), 
+        },
     )
 
 
