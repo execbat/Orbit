@@ -1,4 +1,6 @@
 ![Isaac Lab](logo.png)
+## Trained example
+![Isaac Lab](ballet_preview.gif)
 
 # Isaac Lab — **execbat** Contributor Build (Unitree G1 23-DOF Ballet Teleop)
 

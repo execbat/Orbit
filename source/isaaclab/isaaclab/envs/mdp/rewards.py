@@ -769,4 +769,43 @@ def com_over_support_reward_fast(
     reward = torch.exp(-d2 * inv_two_sigma2)                                                     # (N,)
     return torch.where(any_contact, reward, torch.zeros_like(reward))
     
+def no_command_motion_penalty(
+    env,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+
+    # когда |cmd_lin| < lin_deadband → штраф почти макс; чем меньше deadband, тем «жёстче»
+    lin_deadband: float = 0.05,   # м/с
+    ang_deadband: float = 0.05,   # рад/с
+
+    # нормировочные масштабы (примерно под «типичные» макс-скорости)
+    lin_scale: float = 1.0,       # м/с  → влияет на величину линейного штрафа
+    ang_scale: float = 1.0,       # рад/с → влияет на величину углового штрафа
+) -> torch.Tensor:
+    """
+    Штраф за движение, когда НЕТ команды на движение.
+    penalty = gate_lin * (||v_xy||/lin_scale)^2 + gate_ang * (|w_z|/ang_scale)^2,
+    где gate_* ≈ 1 при маленькой команде и → 0 при росте команды.
+    """
+    asset = env.scene[asset_cfg.name]
+
+    # команда [vx, vy, wz] в базе
+    cmd = env.command_manager.get_term(command_name).command  # (N,3)
+    cmd_lin_mag = cmd[:, :2].norm(dim=1)                      # (N,)
+    cmd_ang_mag = cmd[:, 2].abs()                             # (N,)
+
+    # скорости базы
+    v_xy = asset.data.root_lin_vel_b[:, :2]                   # (N,2)
+    w_z  = asset.data.root_ang_vel_b[:, 2]                    # (N,)
+
+    # плавные «шторки» (1 при нулевой команде → 0 около deadband и дальше)
+    # экспонента даёт гладкую и дифференцируемую форму
+    gate_lin = torch.exp(- (cmd_lin_mag / max(lin_deadband, 1e-6))**2)  # (N,)
+    gate_ang = torch.exp(- (cmd_ang_mag / max(ang_deadband, 1e-6))**2)  # (N,)
+
+    lin_term = (v_xy.norm(dim=1) / max(lin_scale, 1e-6))**2
+    ang_term = (w_z.abs() / max(ang_scale, 1e-6))**2
+
+    penalty = gate_lin * lin_term + gate_ang * ang_term
+    return penalty
          

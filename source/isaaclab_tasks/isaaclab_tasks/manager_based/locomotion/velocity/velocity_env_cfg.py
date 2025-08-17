@@ -562,6 +562,18 @@ class MathRewardsCfg:
         },
     )
 
+    no_cmd_motion = RewTerm(
+        func=mdp.no_command_motion_penalty,
+        weight=-3.0,   
+        params={
+            "command_name": "base_velocity",
+            "lin_deadband": 0.03,   # чувствительность к «нулевой» линейной команде (м/с)
+            "ang_deadband": 0.03,   # чувствительность к «нулевой» угловой команде (рад/с)
+            "lin_scale": 0.6,       # ожидаемая рабочая Vmax ~0.6 м/с
+            "ang_scale": 1.0,       # ожидаемая рабочая Wmax ~1 рад/с
+        },
+    )
+
 
     
     # -- optional penalties
@@ -734,7 +746,7 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return min(0.5, 0.05 + self.stage / 5000.0)
+        return min(0.2, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0
