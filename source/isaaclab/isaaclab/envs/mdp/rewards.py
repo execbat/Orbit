@@ -1217,3 +1217,126 @@ def _asl_update_prev_both(env, cs, sensor_cfg, thr):
     Lc = fmag[:, 0] > thr
     Rc = fmag[:, 1] > thr
     env._asl_prev_both = (Lc & Rc)    
+    
+def heading_alignment_reward(
+    env,
+    command_name: str = "base_velocity",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    lin_cmd_threshold: float = 0.05,   # м/с
+    beta: float = 4.0,                 # «резкость»
+) -> torch.Tensor:
+    """
+    Награда ∈[0..1] за согласование продольной оси корпуса с направлением команды скорости.
+    Работает только при |v_cmd| > lin_cmd_threshold.
+    """
+    robot = env.scene[asset_cfg.name]
+    cmd   = env.command_manager.get_term(command_name).command  # (N,3)
+    v_xy  = cmd[:, :2]
+    v_mag = v_xy.norm(dim=1)
+    gate  = v_mag > lin_cmd_threshold
+    if not gate.any():
+        return torch.zeros(env.num_envs, device=env.device)
+
+    # единичный вектор «куда ехать» в мире
+    v_dir = v_xy / v_mag.clamp_min(1e-6).unsqueeze(-1)
+
+    # продольная ось корпуса в мире
+    fwd_w = math_utils.quat_apply(
+        robot.data.root_quat_w,
+        torch.tensor([1.0, 0.0, 0.0], device=env.device).expand_as(robot.data.root_pos_w),
+    )[:, :2]
+    fwd_dir = fwd_w / fwd_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    cosang = (fwd_dir * v_dir).sum(dim=-1).clamp(-1.0, 1.0)
+    # 1 при сонаправленности → падает при рассогласовании
+    r = torch.exp(-beta * (1.0 - cosang))
+    return r * gate.float()
+    
+def swing_foot_clearance_reward(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "base_velocity",
+    contact_force_threshold: float = 5.0,
+    lin_cmd_threshold: float = 0.05,   # активируем только при команде на ходьбу
+    h_des: float = 0.06,               # желаемый клиренс, м
+    beta: float = 120.0,               # «узость» колокола
+) -> torch.Tensor:
+    """
+    Награда за клиренс маховой стопы при одноопорной фазе.
+    r = exp(-beta * (clearance - h_des)^2), где clearance = z_swing - z_stance.
+    Только когда |v_cmd| > порога. Награда 0 в двухопоре/беспконтактной фазе.
+    """
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # врата по команде
+    cmd   = env.command_manager.get_term(command_name).command
+    v_mag = cmd[:, :2].norm(dim=1)
+    move_gate = v_mag > lin_cmd_threshold
+    if not move_gate.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    # контакты (устойчиво по истории)
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+
+    # одноопора?
+    single_L = Lc & (~Rc)   # левая — опора, правая — мах
+    single_R = Rc & (~Lc)   # правая — опора, левая — мах
+    single   = single_L | single_R
+    if not single.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    feet_z = robot.data.body_pos_w[:, sensor_cfg.body_ids, 2]  # (N,2)
+    # clearance = z(swing) - z(stance)
+    clr_L = (feet_z[:, 1] - feet_z[:, 0])   # если левая — опора → правая мах
+    clr_R = (feet_z[:, 0] - feet_z[:, 1])   # если правая — опора → левая мах
+    clearance = torch.zeros(env.num_envs, device=device)
+    clearance[single_L] = clr_L[single_L]
+    clearance[single_R] = clr_R[single_R]
+    clearance = clearance.clamp_min(0.0)    # не поощряем «в землю»
+
+    r = torch.exp(-beta * (clearance - h_des).pow(2))
+    return r * (single & move_gate).float()    
+    
+    
+def masked_action_rate_l2(env, mask_name: str = "dof_mask") -> torch.Tensor:
+    """
+    L2 на Δaction ТОЛЬКО по активным DOF (mask==1). Снижает дёрганье там,
+    где мы реально что-то трекаем по UDP.
+    """
+    act  = env.action_manager.action
+    prev = env.action_manager.prev_action
+    d    = (act - prev).pow(2)
+    m    = (env.command_manager.get_term(mask_name).command > 0.5).float()
+    num  = m.sum(dim=1).clamp_min(1.0)
+    return (d * m).sum(dim=1) / num
+    
+def masked_success_stable_bonus(
+    env,
+    eps: float = 0.03,      # допуск по позе в норме [-1..1]
+    vel_eps: float = 0.03,  # допуск по норм. скорости
+    bonus: float = 1.0,
+    mask_name: str = "dof_mask",
+) -> torch.Tensor:
+    """
+    Бонус, когда активные DOF (mask==1) и близки к целям, и «успокоились» по скорости.
+    Хорош для удержания достигнутого таргета (без раскачки).
+    """
+    robot = env.scene["robot"]
+    q     = robot.data.joint_pos
+    qd    = robot.data.joint_vel
+    qmin, qmax = robot.data.soft_joint_pos_limits[...,0], robot.data.soft_joint_pos_limits[...,1]
+    mid, scl = 0.5*(qmin+qmax), 2.0/(qmax-qmin+1e-6)
+    qn, qdn  = (q - mid)*scl, qd*scl
+
+    tgt = env.command_manager.get_term("target_joint_pose").command
+    msk = env.command_manager.get_term(mask_name).command > 0.5
+
+    ok_pos = (qn - tgt).abs() <= eps
+    ok_vel = qdn.abs() <= vel_eps
+    ok = torch.where(msk, ok_pos & ok_vel, torch.ones_like(ok_pos, dtype=torch.bool))
+    return bonus * ok.all(dim=1).float()            

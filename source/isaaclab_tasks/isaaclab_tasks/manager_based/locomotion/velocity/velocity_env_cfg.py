@@ -734,7 +734,36 @@ class MathRewardsCfg:
             "step_gain": 0.40,
             "beta_stride": 3.0,
         },
+    )   
+    
+    
+    heading_align = RewTerm(
+        func=mdp.heading_alignment_reward,
+        weight=1.0,
+        params={"command_name": "base_velocity", "lin_cmd_threshold": 0.05, "beta": 4.0},
     )       
+    
+    swing_clearance = RewTerm(
+        func=mdp.swing_foot_clearance_reward,
+        weight=1.5,   # 1.0–2.0
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_ankle_roll_link","right_ankle_roll_link"]),
+            "asset_cfg":  SceneEntityCfg("robot"),
+            "command_name": "base_velocity",
+            "contact_force_threshold": 5.0,
+            "h_des": 0.06,
+            "beta": 120.0,
+        },
+    )
+    
+    masked_action_rate = RewTerm(func=mdp.masked_action_rate_l2, weight=-0.05, params={"mask_name": "dof_mask"})
+    
+    masked_success_stable = RewTerm(
+        func=mdp.masked_success_stable_bonus,
+        weight=4.0,   # 2–5
+        params={"eps": 0.03, "vel_eps": 0.03, "bonus": 1.0, "mask_name": "dof_mask"},
+    )
+ 
     
 @configclass
 class MathTeleopRewardsCfg:
