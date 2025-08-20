@@ -399,49 +399,37 @@ def miander_tracking_reward(env) -> torch.Tensor:
 
 #    return penalty
 
-def miander_untracking_reward(env) -> torch.Tensor:
-    """
-    Награда за «не-трекание» : берём **только НЕ-активные** DOF (mask==0)
-    и хотим, чтобы они остались близки к исходной (neutral) позе.
-
-    reward = 1 − MSE/4   ∈ [0,1];  затем смещаем ­0.5, как в исходной версии.
-    """
+def miander_untracking_reward(
+    env,
+    command_name: str = "base_velocity",
+    lin_cmd_threshold: float = 0.05,
+    leg_bits: tuple[int, ...] = (0,1,3,4,7,8,11,12,15,16,19,20),
+) -> torch.Tensor:
     asset = env.scene["robot"]
+    mask_cmd = env.command_manager.get_term("dof_mask").command         # (N,J)
+    inverse_mask = mask_cmd <= 0.5                                      # неактивные
 
-    # ---------------------------------------------------------------- mask & target
-    mask_cmd = env.command_manager.get_term("dof_mask").command     # (N,J)
-    inverse_mask = mask_cmd <= 0.5                                  # inactive DOF
+    q = asset.data.joint_pos
+    qmin = asset.data.soft_joint_pos_limits[..., 0]
+    qmax = asset.data.soft_joint_pos_limits[..., 1]
+    qn = 2.0 * (q - (qmin + qmax) * 0.5) / (qmax - qmin + 1e-6)
 
-    # ---------------------------------------------------------------- текущие углы, нормированные в [-1,1]
-    joint_pos = asset.data.joint_pos
-    joint_min = asset.data.soft_joint_pos_limits[..., 0]
-    joint_max = asset.data.soft_joint_pos_limits[..., 1]
-    norm_joint = 2.0 * (joint_pos - (joint_min + joint_max) * 0.5) \
-                 / (joint_max - joint_min + 1e-6)
+    init_norm = env.JOINT_INIT_POS_NORM.to(qn.device).unsqueeze(0)      # (1,J)
+    se = (qn - init_norm).pow(2)
 
-    # ---------------------------------------------------------------- исходная (нейтральная) поза
-    # уже хранится в env, нормирована
-    init_norm = env.JOINT_INIT_POS_NORM.to(norm_joint.device).unsqueeze(0)  # (1,J)
+    # --- движение вперёд? → выключаем вклад суставов ног из этого терма
+    cmd = env.command_manager.get_term(command_name).command
+    move_gate = cmd[:, :2].norm(dim=1) > lin_cmd_threshold              # (N,)
+    W = inverse_mask.float()                                            # (N,J)
+    if move_gate.any():
+        if not hasattr(env, "_leg_bits_tensor"):
+            env._leg_bits_tensor = torch.as_tensor(leg_bits, device=env.device, dtype=torch.long)
+        W[move_gate][:, env._leg_bits_tensor] = 0.0
 
-    # ---------------------------------------------------------------- MSE по неактивным DOF
-    se          = (norm_joint - init_norm).pow(2)
-    se_masked   = se * inverse_mask
-    inactive_n  = inverse_mask.sum(dim=1)                                 # (N,)
-
-    mse = torch.where(
-        inactive_n > 0,
-        se_masked.sum(dim=1) / inactive_n.clamp(min=1),
-        torch.zeros_like(inactive_n, dtype=se.dtype),
-    )
-
-    # ---------------------------------------------------------------- reward ∈ [0,1]
-    reward = torch.where(
-        inactive_n > 0,
-        1.0 - mse / 4.0,
-        torch.zeros_like(mse),
-    ).clamp_(0.0, 1.0)
-
-    return reward # - 0.5
+    se_masked = se * W
+    denom = W.sum(dim=1).clamp_min(1.0)
+    mse = se_masked.sum(dim=1) / denom
+    return (1.0 - mse / 4.0).clamp(0.0, 1.0)
 
 
 
@@ -475,143 +463,163 @@ def pelvis_height_target_reward(env: MathManagerBasedRLEnv,
 def feet_separation_and_alignment_penalty(
     env,
     sensor_cfg: SceneEntityCfg,
-    asset_cfg : SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     command_name: str = "base_velocity",
 
     # (0) прямой штраф по суставам ankle_pitch → к нейтрали
     ankle_pitch_joint_names=("left_ankle_pitch_joint", "right_ankle_pitch_joint"),
-    w_ankle_neutral: float = 2.0,          # ↑ вес прямого «выпрямления» стоп по суставам
+    w_ankle_neutral: float = 2.0,
 
-    # (1) «ступня параллельно полу» через Z-оси
-    w_tilt: float = 1.0,                   # можно оставить меньше, основное делает w_ankle_neutral
-    foot_normal_local =(0.0, 0.0, 1.0),
+    # (1) «ступня параллельно полу» через нормаль подошвы
+    w_tilt: float = 1.0,
+    foot_normal_local=(0.0, 0.0, 1.0),
 
-    # (2) выравнивание стоп с направлением таза (при 2 контактах)
-    w_align: float = 0.5,
+    # (1b) «против носка/пятки»: продольная ось должна быть горизонтальна
+    w_pitch_flat: float = 2.0,
     foot_forward_local=(1.0, 0.0, 0.0),
 
-    # (3) продольная длина шага (при 2 контактах)
+    # (2) выравнивание стоп с направлением таза (только при двухопорной фазе)
+    w_align: float = 0.5,
+
+    # (3) продольная длина шага (только при двухопорной)
     w_stride: float = 0.7,
     step_gain: float = 0.40,
     beta_stride: float = 3.0,
     v_near_zero: float = 0.05,
     w_opposite_at_zero: float = 0.5,
 
-    # (4) перехлест
+    # (4) перехлёст (только при двухопорной)
     w_cross: float = 0.7,
     beta_cross: float = 6.0,
 
-    # боковая ширина
+    # боковая ширина (только при двухопорной)
     shoulder_width: float = 0.35,
     beta_sep: float = 2.0,
     w_sep: float = 1.0,
 
     contact_force_threshold: float = 1.0,
 ) -> torch.Tensor:
+    """
+    Суммарный penalty ≥ 0 за «некорректную» постановку стоп при контактах.
+    Усиливает: (а) плоскость касания (без носка/пятки), (б) нейтраль по ankle_pitch,
+    (в) корректную геометрию шага и отсутствие перехлёста/узкой стойки.
+    """
     device = env.device
-    robot  = env.scene[asset_cfg.name]
+    robot: Articulation | RigidObject = env.scene[asset_cfg.name]
     cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    # helper: привести локальные оси к форме (1,2,3) [L,R]
+    # --- helpers: локальные оси для обеих стоп (1,2,3)
     def _per_foot(vec):
-        v = torch.tensor(vec, dtype=torch.float32, device=device)
-        if v.ndim == 1: v = v.view(1,1,3).expand(1,2,3)
-        else:           v = v.view(1,2,3)
-        return v
+        v = torch.as_tensor(vec, dtype=torch.float32, device=device)
+        return v.view(1, 1, 3).expand(1, 2, 3)
 
-    nrm_loc = _per_foot(foot_normal_local)
-    fwd_loc = _per_foot(foot_forward_local)
-    world_up = torch.tensor([0.0, 0.0, 1.0], device=device).view(1,1,3)
+    nrm_loc = _per_foot(foot_normal_local)     # нормаль подошвы в ЛСК стопы
+    fwd_loc = _per_foot(foot_forward_local)    # продольная ось стопы в ЛСК
+    world_up = torch.tensor([0.0, 0.0, 1.0], device=device).view(1, 1, 3)
 
-    # контакты (N,2)
-    forces   = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
-    contacts = forces.norm(dim=-1).max(dim=1)[0] > contact_force_threshold    # (N,2) [L,R]
-    both_down = contacts.all(dim=1)                                           # (N,)
-    n_down    = contacts.float().sum(dim=1).clamp(min=1.0)                    # (N,)
+    # --- контакты (устойчиво к шуму за счёт .amax по истории)
+    f_hist = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]    # (N,H,2,3)
+    fmag = f_hist.norm(dim=-1).amax(dim=1)                                  # (N,2)
+    contacts = fmag > contact_force_threshold                               # (N,2) [L,R]
+    both_down = contacts.all(dim=1)                                         # (N,)
+    n_down = contacts.float().sum(dim=1).clamp(min=1.0)                     # (N,)
 
-    # позы/ориентации
-    feet_pos_w  = robot.data.body_pos_w[:, sensor_cfg.body_ids, :]   # (N,2,3)
-    feet_quat_w = robot.data.body_quat_w[:, sensor_cfg.body_ids, :]  # (N,2,4)
-    root_pos_w  = robot.data.root_pos_w                              # (N,3)
-    root_quat_w = robot.data.root_quat_w                             # (N,4)
+    # --- позы/ориентации
+    feet_pos_w  = robot.data.body_pos_w[:, sensor_cfg.body_ids, :]          # (N,2,3)
+    feet_quat_w = robot.data.body_quat_w[:, sensor_cfg.body_ids, :]         # (N,2,4)
+    root_pos_w  = robot.data.root_pos_w                                     # (N,3)
+    root_quat_w = robot.data.root_quat_w                                    # (N,4)
 
-    base_fwd_w = math_utils.quat_apply(root_quat_w, torch.tensor([1.0,0.0,0.0], device=device).expand_as(root_pos_w))
-    base_lat_w = math_utils.quat_apply(root_quat_w, torch.tensor([0.0,1.0,0.0], device=device).expand_as(root_pos_w))
-    f_xy = base_fwd_w[:, :2]; f_xy = f_xy / f_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    l_xy = base_lat_w[:, :2]; l_xy = l_xy / l_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    base_fwd_w = math_utils.quat_apply(
+        root_quat_w, torch.tensor([1.0, 0.0, 0.0], device=device).expand_as(root_pos_w)
+    )
+    base_lat_w = math_utils.quat_apply(
+        root_quat_w, torch.tensor([0.0, 1.0, 0.0], device=device).expand_as(root_pos_w)
+    )
+    f_xy = base_fwd_w[:, :2]
+    f_xy = f_xy / f_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    l_xy = base_lat_w[:, :2]
+    l_xy = l_xy / l_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
 
-    # ---------- (0) прямой штраф по ankle_pitch к нейтрали ----------
-    # кэшируем индексы один раз
+    # ---------- (0) ankle_pitch → к нейтрали (только для контактирующих ног)
     if not hasattr(env, "_ankle_pitch_ids"):
         jnames = list(robot.data.joint_names)
         try:
             env._ankle_pitch_ids = torch.tensor(
-                [jnames.index(ankle_pitch_joint_names[0]), jnames.index(ankle_pitch_joint_names[1])],
+                [jnames.index(ankle_pitch_joint_names[0]),
+                 jnames.index(ankle_pitch_joint_names[1])],
                 device=device, dtype=torch.long
             )
         except ValueError as e:
-            raise RuntimeError(f"Не нашёл ankle_pitch сустав: {e}")
+            raise RuntimeError(f"Не найден ankle_pitch сустав: {e}")
 
-        # возьмём целевые нейтрали из сохранённых нормированных значений энва
         init_norm = env.JOINT_INIT_POS_NORM.to(device)
         env._ankle_pitch_init_norm = init_norm[env._ankle_pitch_ids]  # (2,)
 
-    jidx = env._ankle_pitch_ids                                        # (2,)
-    q     = robot.data.joint_pos                                       # (N,J)
-    qmin  = robot.data.soft_joint_pos_limits[...,0]                    # (N,J)
-    qmax  = robot.data.soft_joint_pos_limits[...,1]                    # (N,J)
-    qmid  = 0.5*(qmin+qmax); qhalf = 0.5*(qmax-qmin)
-    qn    = ((q - qmid) / (qhalf + 1e-6)).clamp(-1.0, 1.0)             # норм. позы (N,J)
+    jidx = env._ankle_pitch_ids
+    q    = robot.data.joint_pos
+    qmin = robot.data.soft_joint_pos_limits[..., 0]
+    qmax = robot.data.soft_joint_pos_limits[..., 1]
+    qmid = 0.5 * (qmin + qmax)
+    qhal = 0.5 * (qmax - qmin)
+    qn   = ((q - qmid) / (qhal + 1e-6)).clamp(-1.0, 1.0)
 
-    qn_ankles   = qn[:, jidx]                                          # (N,2) [L,R]
-    qn_target   = env._ankle_pitch_init_norm.view(1,2)                 # (1,2)
-    ankle_err   = (qn_ankles - qn_target).abs()                        # (N,2)
-    # штрафуем по каждой ноге только когда эта нога в контакте
-    ankle_neutral_each = ankle_err * contacts.float()                  # (N,2)
-    ankle_neutral_pen  = ankle_neutral_each.sum(dim=1) / n_down        # (N,)
+    qn_ank    = qn[:, jidx]                                # (N,2)
+    qn_target = env._ankle_pitch_init_norm.view(1, 2)      # (1,2)
+    ankle_err = (qn_ank - qn_target).abs()                 # (N,2)
+    ankle_neutral_pen = (ankle_err * contacts.float()).sum(dim=1) / n_down
 
-    # ---------- (1) «ступни параллельно полу» через Z ----------
-    z_world = math_utils.quat_apply(feet_quat_w, nrm_loc.expand_as(feet_pos_w))  # (N,2,3)
-    cos_up  = (z_world * world_up).sum(dim=-1).abs().clamp(0.0, 1.0)
+    # ---------- (1) «ступни параллельно полу» через нормаль подошвы
+    nrm_w  = math_utils.quat_apply(feet_quat_w, nrm_loc.expand_as(feet_pos_w))  # (N,2,3)
+    cos_up = (nrm_w * world_up).sum(dim=-1).abs().clamp(0.0, 1.0)               # (N,2)
     tilt_each = 1.0 - cos_up
     tilt_pen  = (tilt_each * contacts.float()).sum(dim=1) / n_down
 
-    # ---------- (2) выравнивание стоп по направлению таза ----------
-    foot_fwd_w  = math_utils.quat_apply(feet_quat_w, fwd_loc.expand_as(feet_pos_w))
+    # ---------- (1b) НОВОЕ: «против носка/пятки» — продольная ось горизонтальна
+    foot_fwd_w = math_utils.quat_apply(feet_quat_w, fwd_loc.expand_as(feet_pos_w))  # (N,2,3)
+    pitch_vert_each = foot_fwd_w[:, :, 2].abs()                                     # |z-компонента «вперёд»|
+    pitch_flat_pen  = (pitch_vert_each * contacts.float()).sum(dim=1) / n_down
+
+    # ---------- (2) выравнивание стоп по направлению таза (только при двухопорной)
     foot_dir_xy = foot_fwd_w[:, :, :2]
     foot_dir_xy = foot_dir_xy / foot_dir_xy.norm(dim=-1, keepdim=True).clamp(min=1e-6)
-    cos_to_pelvis = (foot_dir_xy * f_xy.unsqueeze(1)).sum(dim=-1).clamp(-1.0, 1.0)
+    cos_to_pelvis = (foot_dir_xy * f_xy.unsqueeze(1)).sum(dim=-1).clamp(-1.0, 1.0)  # (N,2)
     align_term = 0.5 * (1.0 - cos_to_pelvis).mean(dim=1)
     align_pen  = torch.where(both_down, align_term, torch.zeros_like(align_term))
 
-    # ---------- (3) продольная длина шага ----------
-    rel_xy = (feet_pos_w[:, :, :2] - root_pos_w[:, :2].unsqueeze(1))
-    sL = (rel_xy[:, 0, :] * f_xy).sum(dim=-1); sR = (rel_xy[:, 1, :] * f_xy).sum(dim=-1)
+    # ---------- (3) продольная длина шага / «противоположность» при почти нулевой V
+    rel_xy = feet_pos_w[:, :, :2] - root_pos_w[:, :2].unsqueeze(1)  # (N,2,2)
+    sL = (rel_xy[:, 0, :] * f_xy).sum(dim=-1)
+    sR = (rel_xy[:, 1, :] * f_xy).sum(dim=-1)
     d_long = (sL - sR).abs()
-    v_cmd  = env.command_manager.get_term(command_name).command[:, :2]
-    v_mag  = v_cmd.norm(dim=-1)
-    d_des  = step_gain * v_mag
+
+    v_cmd = env.command_manager.get_term(command_name).command[:, :2]
+    v_mag = v_cmd.norm(dim=-1)
+    d_des = step_gain * v_mag
     stride_term = 1.0 - torch.exp(-beta_stride * (d_long - d_des).abs())
     stride_pen  = torch.where(both_down, stride_term, torch.zeros_like(stride_term))
+
     opposite_bool  = (sL * sR) < 0
     low_speed_gate = (v_near_zero - v_mag).clamp(min=0.0) / max(v_near_zero, 1e-6)
     opposite_pen   = w_opposite_at_zero * (opposite_bool.float() * low_speed_gate)
 
-    # ---------- (4) перехлёст ----------
+    # ---------- (4) перехлёст (только при двухопорной)
     yL = (rel_xy[:, 0, :] * l_xy).sum(dim=-1)
     yR = (rel_xy[:, 1, :] * l_xy).sum(dim=-1)
     cross_depth = torch.relu(-yL) + torch.relu(+yR)
     cross_term  = 1.0 - torch.exp(-beta_cross * cross_depth)
     cross_pen   = torch.where(both_down, cross_term, torch.zeros_like(cross_term))
 
-    # боковая ширина
+    # ---------- боковая ширина (только при двухопорной)
     dist_xy = (feet_pos_w[:, 0, :2] - feet_pos_w[:, 1, :2]).norm(dim=-1)
     sep_term = 1.0 - torch.exp(-beta_sep * (dist_xy - shoulder_width).abs())
     sep_pen  = torch.where(both_down, sep_term, torch.zeros_like(sep_term))
 
+    # ---------- суммарный penalty
     penalty = (
         w_ankle_neutral * ankle_neutral_pen
       + w_tilt          * tilt_pen
+      + w_pitch_flat    * pitch_flat_pen
       + w_align         * align_pen
       + w_stride        * stride_pen
       +                   opposite_pen
@@ -808,4 +816,404 @@ def no_command_motion_penalty(
 
     penalty = gate_lin * lin_term + gate_ang * ang_term
     return penalty
-         
+
+def joint_limit_saturation_penalty(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    margin: float = 0.10,     # «запретная зона» у границы в норм. шкале: 0.10 = 10% от края
+    beta: float = 8.0,        # крутизна роста штрафа при заходе в margin
+    use_mask: bool = False,   # если True — учитываем только активные DOF по dof_mask
+    mask_name: str = "dof_mask",
+) -> torch.Tensor:
+    """
+    ПЕНАЛЬТИ за «прилипание к лимитам» ещё ДО их пересечения.
+
+    • Нормируем углы в [-1,1] по soft limits.
+    • Считаем slack = 1 - |q_n|  (насколько далеко от края).
+    • Если slack < margin → есть нарушение. violation = (margin - slack)/margin ∈ [0,1].
+    • per_joint = 1 - exp(-beta * violation)  — гладкий рост к 1 у самой границы.
+    • Возврат: средний штраф по (активным|всем) DOF: shape (N,), ≥0.
+    """
+    asset = env.scene[asset_cfg.name]
+    q     = asset.data.joint_pos
+    qmin  = asset.data.soft_joint_pos_limits[..., 0]
+    qmax  = asset.data.soft_joint_pos_limits[..., 1]
+
+    mid   = 0.5 * (qmin + qmax)
+    half  = 0.5 * (qmax - qmin)
+    qn    = ((q - mid) / (half + 1e-6)).clamp(-1.0, 1.0)   # норм. позы ∈ [-1,1]
+
+    # расстояние до края (в норм. шкале)
+    slack = 1.0 - qn.abs()                   # ∈ [0,1]
+    # нарушение «зашли в margin-зону»
+    violation = (margin - slack).clamp_min(0.0) / max(margin, 1e-6)   # ∈ [0,1]
+    per_joint = 1.0 - torch.exp(-beta * violation)                    # гладко к 1
+
+    if use_mask:
+        mask = env.command_manager.get_term(mask_name).command > 0.5   # (N,J) bool
+        num = mask.sum(dim=1).clamp_min(1)
+        pen = (per_joint * mask.float()).sum(dim=1) / num
+    else:
+        pen = per_joint.mean(dim=1)
+
+    return pen
+    
+def single_foot_stationary_penalty(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_force_threshold: float = 5.0,
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    command_name: str = "base_velocity",
+    use_mask: bool = True,
+    mask_name: str = "dof_mask",
+    leg_bits: list[int] = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+    scale_by_asymmetry: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Штраф за одноопорную стойку, когда:
+      • |cmd| ≈ 0  ИЛИ  ноги «выключены» по маске.
+
+    Возврат: тензор ≥0 формы [N].
+    """
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # --- near-zero команды ---
+    cmd   = env.command_manager.get_term(command_name).command  # (N,3): vx,vy,wz
+    near0 = (cmd[:, :2].norm(dim=1) < lin_deadband) & (cmd[:, 2].abs() < ang_deadband)
+
+    # --- ноги выключены по маске? ---
+    if use_mask and hasattr(env.command_manager, "get_term"):
+        dof_mask = env.command_manager.get_term(mask_name).command  # (N,J) in {0,1}
+        legs_inactive = (dof_mask[:, leg_bits].sum(dim=1) <= 0.0)
+    else:
+        legs_inactive = torch.zeros_like(near0, dtype=torch.bool)
+
+    gate = near0 # | legs_inactive  # штрафуем, если покой ИЛИ нет команд на ноги
+    if not gate.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    # --- контакты стоп из истории (устойчиво к шуму) ---
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
+    left_contact  = fmag[:, 0] > contact_force_threshold
+    right_contact = fmag[:, 1] > contact_force_threshold
+    single_support = left_contact ^ right_contact  # XOR
+
+    pen = (single_support & gate).float()
+
+    if scale_by_asymmetry:
+        asym = (fmag[:, 0] - fmag[:, 1]).abs() / (fmag.sum(dim=1) + eps)
+        pen = pen * (1.0 + asym)  # 1…~2
+
+    return pen
+    
+def leg_symmetry_idle_reward_norm(
+    env,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "base_velocity",
+    dof_mask_name: str = "dof_mask",
+    obs_key_norm: str = "dof_pos_norm",   # принимаем для совместимости с конфигом
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    left_dofs: list[int]  = (0, 3, 7, 11, 15, 19),
+    right_dofs: list[int] = (1, 4, 8, 12, 16, 20),
+    w_sym: float = 0.6,
+    w_init: float = 0.4,
+    beta_sym: float = 6.0,
+    beta_init: float = 4.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """
+    Ревард > 0, когда:
+      • |cmd| ≈ 0  И  ноги выключены по маске.
+    Поощряет:
+      (1) схожесть L/R, (2) близость обеих ног к init-позе (в норме [-1,1]).
+    """
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+
+    # --- врата: нулевые команды ---
+    cmd   = env.command_manager.get_term(command_name).command  # (N,3)
+    near0 = (cmd[:, :2].norm(dim=1) < lin_deadband) & (cmd[:, 2].abs() < ang_deadband)
+
+    # --- ноги выключены по маске ---
+    dof_mask = env.command_manager.get_term(dof_mask_name).command  # (N,J) in {0,1}
+    legs_mask = dof_mask[:, list(left_dofs) + list(right_dofs)]
+    legs_inactive = legs_mask.sum(dim=1) <= 0.0
+
+    gate = near0 & legs_inactive
+    if not gate.any():
+        return torch.zeros(env.num_envs, device=device)
+
+    # --- нормированные позы ∈[-1,1] (как в твоих термах) ---
+    q     = robot.data.joint_pos
+    qmin  = robot.data.soft_joint_pos_limits[..., 0]
+    qmax  = robot.data.soft_joint_pos_limits[..., 1]
+    mid   = 0.5 * (qmin + qmax)
+    half  = 0.5 * (qmax - qmin)
+    qn    = ((q - mid) / (half + eps)).clamp(-1.0, 1.0)
+
+    # init-поза уже в норме
+    q0n = env.JOINT_INIT_POS_NORM.to(device=device, dtype=qn.dtype)  # (J,)
+
+    # разбиение на ноги
+    L = torch.as_tensor(left_dofs,  device=device, dtype=torch.long)
+    R = torch.as_tensor(right_dofs, device=device, dtype=torch.long)
+    qnL, qnR = qn[:, L], qn[:, R]
+    q0L, q0R = q0n[L], q0n[R]
+
+    # --- ошибки ---
+    sym_err  = (qnL - qnR).abs().mean(dim=1)  # (N,)
+    init_err = 0.5 * ((qnL - q0L).abs().mean(dim=1) + (qnR - q0R).abs().mean(dim=1))
+
+    # --- колокола ---
+    r_sym  = torch.exp(-beta_sym  * sym_err)
+    r_init = torch.exp(-beta_init * init_err)
+    reward = (w_sym * r_sym + w_init * r_init) * gate.float()
+    return reward    
+
+def alternating_step_reward(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "base_velocity",
+
+    # врата
+    lin_cmd_threshold: float = 0.05,
+    use_mask: bool = True,
+    mask_name: str = "dof_mask",
+    leg_bits: tuple[int, ...] = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+
+    # контакты/устойчивость
+    contact_force_threshold: float = 5.0,
+    initial_lead: str = "right",   # первая двухопорная: кто спереди
+    step_gain: float = 0.40,
+    beta_stride: float = 3.0,
+) -> torch.Tensor:
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    N = env.num_envs
+
+    # --- инициализация внутреннего состояния ---
+    _altstep_state_init_(env, N, device, initial_lead)
+
+    # --- гейт: есть команда двигаться вперёд ---
+    cmd = env.command_manager.get_term(command_name).command  # (N,3)
+    v_mag = cmd[:, :2].norm(dim=1)
+    move_gate = v_mag > lin_cmd_threshold
+
+    # ноги «выключены» по маске?
+    if use_mask:
+        dof_mask = env.command_manager.get_term(mask_name).command
+        legs_inactive = (dof_mask[:, list(leg_bits)].sum(dim=1) <= 0.0)
+    else:
+        legs_inactive = torch.zeros(N, dtype=torch.bool, device=device)
+
+    gate = move_gate & legs_inactive
+    if not gate.any():
+        # поддерживаем prev_both актуальным, чтобы не терять синхронизацию
+        _altstep_state_update_contacts_(env, cs, sensor_cfg, contact_force_threshold)
+        return torch.zeros(N, device=device)
+
+    # --- контакты (устойчиво по истории) ---
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+    both_down = Lc & Rc
+
+    # --- кто впереди (по продольной оси базы) ---
+    feet_pos_w  = robot.data.body_pos_w[:, sensor_cfg.body_ids, :2]   # (N,2,2)
+    root_pos_w  = robot.data.root_pos_w[:, :2]
+    root_quat_w = robot.data.root_quat_w
+
+    base_fwd_w = math_utils.quat_apply(
+        root_quat_w, torch.tensor([1.0,0.0,0.0], device=device).expand_as(robot.data.root_pos_w)
+    )[:, :2]
+    f_xy = base_fwd_w / base_fwd_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    rel_xy = feet_pos_w - root_pos_w.unsqueeze(1)
+    sL = (rel_xy[:, 0, :] * f_xy).sum(dim=-1)
+    sR = (rel_xy[:, 1, :] * f_xy).sum(dim=-1)
+    lead_now = (sR > sL).long()  # 0=L, 1=R
+
+    # --- ресеты эпизодов ---
+    resets = env.termination_manager.terminated | env.termination_manager.time_outs
+    if resets.any():
+        _altstep_state_reset_(env, resets, both_down, lead_now, initial_lead)
+
+    # --- liftoff-трекинг с прошлого DS ---
+    env._alt_liftoff_L |= ~Lc
+    env._alt_liftoff_R |= ~Rc
+    liftoff_lead = torch.where(lead_now.bool(), env._alt_liftoff_R, env._alt_liftoff_L)
+
+    # --- вход в двухопорную фазу (rising edge) ---
+    ds_on = both_down & (~env._alt_prev_both)
+
+    # --- ожидаемый лидер и оценка длины шага ---
+    exp_lead = env._alt_expected_lead              # 0=L, 1=R
+    correct_lead = (lead_now == exp_lead)
+
+    d_long = (sL - sR).abs()
+    d_des  = step_gain * v_mag
+    stride_score = torch.exp(-beta_stride * (d_long - d_des).abs()).clamp(0.0, 1.0)  # 0..1
+
+    reward = (gate & ds_on & correct_lead & liftoff_lead).float() * (0.5 + 0.5 * stride_score)
+
+    # --- переключить ожидаемого лидера и сбросить liftoff-флаги для тех env, где был DS ---
+    if ds_on.any():
+        env._alt_expected_lead[ds_on] ^= 1
+        env._alt_liftoff_L[ds_on] = False
+        env._alt_liftoff_R[ds_on] = False
+
+    env._alt_prev_both = both_down
+    return reward
+
+
+# --- helpers ---
+def _altstep_state_init_(env, N, device, initial_lead: str):
+    if not hasattr(env, "_alt_prev_both"):
+        init_lead_bit = 1 if str(initial_lead).lower().startswith("r") else 0
+        env._alt_prev_both     = torch.zeros(N, dtype=torch.bool, device=device)
+        env._alt_expected_lead = torch.full((N,), init_lead_bit, dtype=torch.long, device=device)
+        env._alt_liftoff_L     = torch.zeros(N, dtype=torch.bool, device=device)
+        env._alt_liftoff_R     = torch.zeros(N, dtype=torch.bool, device=device)
+
+def _altstep_state_reset_(env, mask, both_down, lead_now, initial_lead: str):
+    init_lead_bit = 1 if str(initial_lead).lower().startswith("r") else 0
+    env._alt_prev_both[mask]     = both_down[mask]
+    env._alt_expected_lead[mask] = init_lead_bit
+    env._alt_liftoff_L[mask]     = False
+    env._alt_liftoff_R[mask]     = False
+
+def _altstep_state_update_contacts_(env, cs, sensor_cfg, contact_force_threshold: float):
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+    env._alt_prev_both = (Lc & Rc)
+    
+def alternating_same_lead_penalty(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str = "base_velocity",
+
+    # врата
+    lin_cmd_threshold: float = 0.05,   # «есть команда на движение»
+    use_mask: bool = True,
+    mask_name: str = "dof_mask",
+    leg_bits: tuple[int, ...] = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+
+    # контакты/оценка шага
+    contact_force_threshold: float = 5.0,
+    step_gain: float = 0.40,   # желаемая длина шага ≈ step_gain * |v_cmd|
+    beta_stride: float = 3.0,  # резкость оценки длины шага
+) -> torch.Tensor:
+    device = env.device
+    robot  = env.scene[asset_cfg.name]
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    N = env.num_envs
+
+    # --- init внутреннего состояния один раз ---
+    _asl_state_init_(env, N, device)
+
+    # --- гейт: есть команда на движение и ноги выключены по маске ---
+    cmd   = env.command_manager.get_term(command_name).command  # (N,3)
+    v_mag = cmd[:, :2].norm(dim=1)
+    move_gate = v_mag > lin_cmd_threshold
+
+    if use_mask:
+        dof_mask = env.command_manager.get_term(mask_name).command
+        legs_inactive = (dof_mask[:, list(leg_bits)].sum(dim=1) <= 0.0)
+    else:
+        legs_inactive = torch.zeros(N, dtype=torch.bool, device=device)
+
+    gate = move_gate & legs_inactive
+    if not gate.any():
+        _asl_update_prev_both(env, cs, sensor_cfg, contact_force_threshold)
+        return torch.zeros(N, device=device)
+
+    # --- контакты (устойчиво по истории) ---
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+    both_down = Lc & Rc
+
+    # --- кто впереди вдоль продольной оси базы ---
+    feet_pos_w  = robot.data.body_pos_w[:, sensor_cfg.body_ids, :2]  # (N,2,2)
+    root_pos_w  = robot.data.root_pos_w[:, :2]
+    root_quat_w = robot.data.root_quat_w
+
+    base_fwd_w = math_utils.quat_apply(
+        root_quat_w, torch.tensor([1.0,0.0,0.0], device=device).expand_as(robot.data.root_pos_w)
+    )[:, :2]
+    f_xy = base_fwd_w / base_fwd_w.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+
+    rel_xy = feet_pos_w - root_pos_w.unsqueeze(1)
+    sL = (rel_xy[:, 0, :] * f_xy).sum(dim=-1)
+    sR = (rel_xy[:, 1, :] * f_xy).sum(dim=-1)
+    lead_now = (sR > sL).long()   # 0=L, 1=R
+
+    # --- ресеты эпизодов ---
+    resets = env.termination_manager.terminated | env.termination_manager.time_outs
+    if resets.any():
+        _asl_state_reset_(env, resets, both_down, lead_now)
+
+    # --- liftoff-трекинг между двухопорными ---
+    env._asl_lift_L |= ~Lc
+    env._asl_lift_R |= ~Rc
+    had_any_liftoff = env._asl_lift_L | env._asl_lift_R    # хоть одна нога отрывалась?
+
+    # --- вход в двухопорную фазу (rising edge) ---
+    ds_on = both_down & (~env._asl_prev_both)
+
+    # --- «тот же лидер?» и масштабирование по длине шага/лифтоффу ---
+    same_lead = env._asl_have_last & (lead_now == env._asl_last_lead)
+    d_long = (sL - sR).abs()
+    d_des  = step_gain * v_mag
+    stride_miss = 1.0 - torch.exp(-beta_stride * (d_long - d_des).abs())     # 0..1 (чем дальше от желаемого — тем ↑)
+
+    # базовый пенальти: когда гейт активен, вход в DS и лидер не сменился
+    pen = (gate & ds_on & same_lead).float()
+
+    # усиление, если вообще не было liftoff'а (скорее всего «проскользили» корпусом)
+    no_liftoff = ~had_any_liftoff
+    scale = 1.0 + 0.5 * no_liftoff.float()            # 1.0 или 1.5
+    pen = pen * scale * (0.5 + 0.5 * stride_miss)     # 0.5..1.5
+
+    # --- обновление состояния после входа в DS ---
+    if ds_on.any():
+        env._asl_last_lead[ds_on] = lead_now[ds_on]
+        env._asl_have_last[ds_on] = True
+        env._asl_lift_L[ds_on] = False
+        env._asl_lift_R[ds_on] = False
+
+    env._asl_prev_both = both_down
+    return pen
+
+
+# --- helpers: per-env состояние ---
+def _asl_state_init_(env, N, device):
+    if not hasattr(env, "_asl_prev_both"):
+        env._asl_prev_both  = torch.zeros(N, dtype=torch.bool, device=device)
+        env._asl_last_lead  = torch.zeros(N, dtype=torch.long, device=device)  # 0=L,1=R
+        env._asl_have_last  = torch.zeros(N, dtype=torch.bool, device=device)
+        env._asl_lift_L     = torch.zeros(N, dtype=torch.bool, device=device)
+        env._asl_lift_R     = torch.zeros(N, dtype=torch.bool, device=device)
+
+def _asl_state_reset_(env, mask, both_down, lead_now):
+    env._asl_prev_both[mask] = both_down[mask]
+    env._asl_have_last[mask] = False
+    env._asl_lift_L[mask]    = False
+    env._asl_lift_R[mask]    = False
+    # last_lead оставляем как есть; он будет установлен при первом DS после ресета
+
+def _asl_update_prev_both(env, cs, sensor_cfg, thr):
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)
+    Lc = fmag[:, 0] > thr
+    Rc = fmag[:, 1] > thr
+    env._asl_prev_both = (Lc & Rc)    
