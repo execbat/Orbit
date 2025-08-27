@@ -100,6 +100,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         self.MAX_PERIOD = 5.0
         self.MIN_PERIOD = 0.5
         self.MASK_PROB_LEVEL = 0.1  
+        self.EXPONENT_MULTIPLOCATOR = 1.0
         
         self.size = (cfg.scene.num_envs, self.NUM_AXIS)         
         # self.miander_scale = torch.rand(*self.size, device=self.dev) * self.MIANDER_SCALE     
@@ -482,7 +483,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         
         ###########
         # Curriculum update logic
-        mean_tracking_reward = info['Episode_Reward/masked_success'].mean().item()
+        mean_tracking_reward = info['Episode_Reward/miander_tracking_reward'].mean().item()
         self._update_adaptive_curriculum(mean_tracking_reward)
         
         # проброс нового лернинг рейта наверх
@@ -516,6 +517,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
             #"MIN_PERIOD": float(self.MIN_PERIOD),
             "MAX_PERIOD": float(self.MAX_PERIOD),
             "MASK_PROB_LEVEL": float(self.MASK_PROB_LEVEL),
+            "EXPONENT_MULTIPLOCATOR": float(self.EXPONENT_MULTIPLOCATOR),
         })
         
     #def get_miander_targets(self) -> torch.Tensor:       
@@ -578,6 +580,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         self.MIANDER_SCALE   = self.adaptive_state.get_miander_scale()
         # self.MAX_PERIOD      = self.adaptive_state.get_max_period()
         self.MASK_PROB_LEVEL = self.adaptive_state.get_mask_prob()
+        self.EXPONENT_MULTIPLOCATOR = self.adaptive_state.get_exponent_multiplicator()
             #print(f"[CURR-UP] step={self.common_step_counter} -> stage={self.adaptive_state.stage} | "
             #      f"scale={self.MIANDER_SCALE:.2f} period={self.MAX_PERIOD:.2f} mask={self.MASK_PROB_LEVEL:.2f}")
         # return self.adaptive_state.get_learning_rate()

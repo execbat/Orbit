@@ -370,10 +370,72 @@ def miander_tracking_reward(env) -> torch.Tensor:
 
     return reward # - 0.5        # если нужен сдвиг
 
+def miander_tracking_reward_exp(env, eps_half: float = 0.25) -> torch.Tensor:
+    """
+    Гладкий трекинг: r = exp(-beta * MSE_active), где beta = ln(2)/eps_half^2.
+    • Масштаб 'eps_half' задаёт «допуск»: при RMS-ошибке = eps_half ревард = 0.5.
+    • Всегда даёт ненулевой градиент, даже при большой ошибке.
+    """
+    import math
+    asset = env.scene["robot"]
 
+    # --- команды ---
+    mask_cmd   = env.command_manager.get_term("dof_mask").command          # (N,J)
+    target_cmd = env.command_manager.get_term("target_joint_pose").command # (N,J)
+    mask = mask_cmd > 0.5
 
+    # --- нормализованные текущие углы ---
+    q     = asset.data.joint_pos
+    qmin  = asset.data.soft_joint_pos_limits[..., 0]
+    qmax  = asset.data.soft_joint_pos_limits[..., 1]
+    mid   = 0.5 * (qmin + qmax)
+    scl   = 2.0 / (qmax - qmin + 1e-6)
+    qn    = (q - mid) * scl
+
+    # --- MSE по активным DOF ---
+    e2 = (qn - target_cmd).pow(2) * mask
+    active_n = mask.sum(dim=1)
+    mse = torch.where(
+        active_n > 0,
+        e2.sum(dim=1) / active_n.clamp(min=1),
+        torch.zeros_like(active_n, dtype=qn.dtype),
+    )
+
+    # --- экспоненциальный колокол ---
+    beta = math.log(2.0) / (eps_half * eps_half + 1e-12)
+    r = torch.exp(-beta * mse)
+
+    # если активных DOF нет — 0 (как в вашей версии)
+    r = torch.where(active_n > 0, r, torch.zeros_like(r))
+    return r
 
     
+#def miander_masked_penalty(env: MathManagerBasedRLEnv) -> torch.Tensor:
+#    alpha = 4.0
+#    asset = env.scene["robot"]
+
+#    joint_pos = asset.data.joint_pos[:, :]
+#    joint_min = asset.data.soft_joint_pos_limits[:, :, 0]
+#    joint_max = asset.data.soft_joint_pos_limits[:, :, 1]
+
+#    offset = (joint_min + joint_max) * 0.5
+#    norm_joint_pos = 2 * (joint_pos - offset) / (joint_max - joint_min + 1e-6)
+
+    # Создаём булеву маску "неактивных" DOF
+#    inverse_mask = env.switcher_mask <= 0.5  # shape: [n_envs, n_joints]
+
+#    abs_error = torch.abs(norm_joint_pos - env.targets)
+#    masked_error = abs_error * inverse_mask  # inverse_mask — булева
+
+#    error = masked_error.sum(dim=1)
+#    penalty = torch.exp(-alpha * error)
+
+    # penalty даём только если есть хоть один неактивный DOF
+#    has_inactive_dof = inverse_mask.any(dim=1)
+#    penalty = torch.where(has_inactive_dof, penalty, torch.zeros_like(penalty))
+
+#    return penalty
+
 def miander_untracking_reward(
     env,
     command_name: str = "base_velocity",
@@ -609,34 +671,30 @@ def feet_separation_and_alignment_penalty(
 
 
 # Additional
-def masked_progress_reward(env, eps=0.0, neg_scale: float = 0.1, mask_name: str = "dof_mask"):
+def masked_progress_reward(env, eps=0.02):
     robot = env.scene["robot"]
-    q, qd = robot.data.joint_pos, robot.data.joint_vel
+    q     = robot.data.joint_pos
+    qd    = robot.data.joint_vel
 
-    qmin = robot.data.soft_joint_pos_limits[..., 0]
-    qmax = robot.data.soft_joint_pos_limits[..., 1]
+    qmin = robot.data.soft_joint_pos_limits[...,0]
+    qmax = robot.data.soft_joint_pos_limits[...,1]
     mid  = 0.5*(qmin+qmax)
-    scl  = 2.0/(qmax - qmin + 1e-6)
+    scl  = 2.0/(qmax-qmin+1e-6)
 
-    qn, qdn = (q - mid) * scl, qd * scl
-    tgt = env.command_manager.get_term("target_joint_pose").command
-    msk = env.command_manager.get_term(mask_name).command > 0.5
+    qn  = (q - mid) * scl                # норм. поза ∈[-1,1]
+    qdn = qd * scl                       # норм. скорость
+    tgt = env.command_manager.get_term("target_joint_pose").command  # (N,J) в норм. шкале
+    msk = env.command_manager.get_term("dof_mask").command > 0.5     # bool
 
-    err  = qn - tgt
-    prog = -(err * qdn)                      # >0 если |err| уменьшается
-
-    # опц. мёртвая зона против дрожи
-    if eps > 0.0:
-        prog = torch.sign(prog) * torch.clamp(prog.abs() - eps, min=0.0)
-
-    # ослабляем отрицательную часть в 10 раз (neg_scale=0.1)
-    prog = torch.where(prog >= 0.0, prog, neg_scale * prog)
-
+    err = (qn - tgt)                     # куда надо двигаться: «к 0»
+    # прогресс = уменьшение |err| ⇒ знак(err) противоположен скорости
+    prog = -(err * qdn)                  # положительно, если движемся к цели
     prog = torch.where(msk, prog, torch.zeros_like(prog))
-    cnt  = msk.sum(dim=1).clamp_min(1)
+    # усредняем по активным суставам; если активных нет — 0
+    cnt  = msk.sum(dim=1).clamp(min=1)
     r    = prog.sum(dim=1) / cnt
-    return r.clamp(-1.0, 1.0)
-    
+    # мягкий клип
+    return r.clamp(min=-1.0, max=1.0)
     
 def unmasked_stillness_penalty(
     env,
@@ -683,7 +741,7 @@ def masked_success_bonus(env, eps=0.03, bonus=1.0):
     qn  = (q - mid) * scl
     tgt = env.command_manager.get_term("target_joint_pose").command
     msk = env.command_manager.get_term("dof_mask").command > 0.5
-   
+
     ok = ((qn - tgt).abs() <= eps) | (~msk)      # немаскированные считаем «ок»
     all_ok = ok.all(dim=1)
     return bonus * all_ok.float()
@@ -1318,7 +1376,7 @@ def masked_success_stable_bonus(
     ok_pos = (qn - tgt).abs() <= eps
     ok_vel = qdn.abs() <= vel_eps
     ok = torch.where(msk, ok_pos & ok_vel, torch.ones_like(ok_pos, dtype=torch.bool))
-    return bonus * ok.all(dim=1).float()  
+    return bonus * ok.all(dim=1).float()     
     
 def leg_pelvis_torso_coalignment_reward(
     env,
@@ -1422,43 +1480,3 @@ def leg_pelvis_torso_coalignment_reward(
     denom = (wA + wB + wC).clamp_min(1e-6)
     r = (wA * yaw_align + wB * chain_align + wC * upright) / denom
     return r.clamp(0.0, 1.0)
-    
-def idle_double_support_bonus(
-    env,
-    sensor_cfg: SceneEntityCfg,
-    command_name: str = "base_velocity",
-    contact_force_threshold: float = 5.0,
-    lin_deadband: float = 0.03,
-    ang_deadband: float = 0.03,
-    bonus: float = 1.0,
-    # биты ног (слева + справа)
-    leg_bits: tuple[int, ...] = (0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20),
-) -> torch.Tensor:
-    """
-    Бонус за «стоялку»: когда команды ≈ 0 И ноги выключены маской — поощряем двухопорие.
-    """
-    device = env.device
-    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
-
-    # near-zero команды
-    cmd   = env.command_manager.get_term(command_name).command  # (N,3)
-    near0 = (cmd[:, :2].norm(dim=1) < lin_deadband) & (cmd[:, 2].abs() < ang_deadband)
-
-    # ноги выключены по маске? (mask==1 значит DOF активен → нам нужно, чтобы ни один из leg_bits не был активным)
-    dof_mask = (env.command_manager.get_term("dof_mask").command > 0.5)  # (N,J) bool
-    if not hasattr(env, "_idle_leg_bits"):
-        env._idle_leg_bits = torch.as_tensor(leg_bits, device=device, dtype=torch.long)
-    legs_inactive = (dof_mask[:, env._idle_leg_bits].sum(dim=1) <= 0)     # (N,) bool
-
-    # требуем ОДНОВРЕМЕННО: near-zero команды И ноги выключены
-    gate = near0 & legs_inactive
-    if not gate.any():
-        return torch.zeros(env.num_envs, device=device)
-
-    # двухопорие по контактам (устойчиво по истории)
-    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
-    Lc = fmag[:, 0] > contact_force_threshold
-    Rc = fmag[:, 1] > contact_force_threshold
-    both_down = Lc & Rc
-
-    return bonus * (both_down & gate).float()

@@ -445,9 +445,9 @@ class RewardsCfg:
     )
     # -- penalties
     lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
+    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.03)
     dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
+    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
     action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
@@ -473,15 +473,34 @@ class MathRewardsCfg:
 
     # -- task
     # reward for following target axis values with axis_mask == 1 # AnumalMath
-    miander_tracking_reward = RewTerm(func=mdp.miander_tracking_reward, weight=4.0)
+    # miander_tracking_reward = RewTerm(func=mdp.miander_tracking_reward, weight=4.0) # 4
+    #miander_tracking_reward = RewTerm(
+    #    func=mdp.miander_tracking_reward_exp,
+    #    weight=4.0,
+    #    params={"eps_half": 0.25}  
+    #)
+    
     # reward for following init axis values with axis_mask == 0 # AnumalMath
-    miander_untracking_reward = RewTerm(func=mdp.miander_untracking_reward, weight=2.0)
+   #  miander_untracking_reward = RewTerm(func=mdp.miander_untracking_reward, weight=2.0) # 2
+    
+    miander_tracking_reward = RewTerm(
+        func=mdp.miander_tracking_reward,
+        weight=10.0,
+           
+    )
+
+    miander_untracking_reward = RewTerm(func=mdp.miander_untracking_reward, weight=5.0)
     
     # 1) прогресс к цели по маскированным суставам
-    masked_progress = RewTerm(
+    #masked_progress = RewTerm(
+    #    func=mdp.masked_progress_reward,
+    #    weight=5.0,                      #  2.0–4.0
+    #    params={}                        # опционально: {"eps": 0.02}
+    #)
+    masked_progress_potential = RewTerm(
         func=mdp.masked_progress_reward,
-        weight=5.0,                      # попробуй 2.0–4.0
-        params={}                        # опционально: {"eps": 0.02}
+        weight=5.0,
+        params={"eps": 0.002, "neg_scale": 0.1, "mask_name": "dof_mask"},
     )
     
     track_lin_vel_xy_exp = RewTerm(
@@ -564,7 +583,7 @@ class MathRewardsCfg:
 
     no_cmd_motion = RewTerm(
         func=mdp.no_command_motion_penalty,
-        weight=-2.0,   
+        weight=-1.0,   
         params={
             "command_name": "base_velocity",
             "lin_deadband": 0.03,   # чувствительность к «нулевой» линейной команде (м/с)
@@ -594,32 +613,37 @@ class MathRewardsCfg:
 #        params={"w_vel": 1.0, "w_tau": 0.1}
 #    )
 
-    # 3) бонус «все активные в допуске»
-    masked_success = RewTerm(
-        func=mdp.masked_success_bonus,
-        weight=10.0,                      # можно поднять до 1.0
-        params={"eps": 0.03, "bonus": 1.0}
-    )
+#    # 3) бонус «все активные в допуске»
+#    masked_success = RewTerm(
+#        func=mdp.masked_success_bonus,
+#        weight=50.0,                      # можно поднять до 1.0
+#        params={"eps": 0.03, "bonus": 1.0}
+#    )
 
     # 4) штраф за боковой слип относительно направления команды
     lateral_slip = RewTerm(
         func=mdp.lateral_slip_penalty,
-        weight=-1.0,
+        weight=-0.5,
         params={"command_name": "base_velocity"}
     )
     
     com_over_support = RewTerm(
-        func=mdp.com_over_support_reward_fast,
-        weight=2.0,   # >0, это РЕВАРД
+        func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
+        weight=3.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
-                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # ваши опоры
+                # выбери один вариант:
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # точные имена
+                # или — если хочешь по маске:
+                # body_names=".*_ankle_roll_link",
             ),
             "asset_cfg": SceneEntityCfg("robot"),
-            "contact_force_threshold": 5.0,   # чуть выше шума
-            "sigma": 0.06,                    # 4–8 см обычно хорошо
-            "weighted": True,                 # опора ближе к более нагруженной ноге
+            "contact_force_threshold": 5.0,
+            # вместо старого `sigma` теперь используем eps_half
+            # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
+            "sigma"   : 0.06,
+            "weighted": True,
         },
     )
     
@@ -637,7 +661,7 @@ class MathRewardsCfg:
     
     single_foot_stationary = RewTerm(
         func=mdp.single_foot_stationary_penalty,
-        weight=-3.0,   
+        weight=-0.5,   
         params={
             # сенсор и ссылки на стопы
             "sensor_cfg": SceneEntityCfg(
@@ -671,7 +695,7 @@ class MathRewardsCfg:
     
     leg_symmetry_idle = RewTerm(
         func=mdp.leg_symmetry_idle_reward_norm,
-        weight=4.0,   # диапазон 2.0–5.0
+        weight=2.0,   # диапазон 2.0–5.0
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
@@ -695,7 +719,7 @@ class MathRewardsCfg:
     
     alternating_steps_reward = RewTerm(
         func=mdp.alternating_step_reward,
-        weight=5.0,   # 2.0–4.0
+        weight=2.0,   # 2.0–4.0
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -716,7 +740,7 @@ class MathRewardsCfg:
     
     same_lead_penalty = RewTerm(
         func=mdp.alternating_same_lead_penalty,
-        weight=-5.0,   # стартово -1.5…-3.0
+        weight=-0.5,   # стартово -1.5…-3.0
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -739,7 +763,7 @@ class MathRewardsCfg:
     
     heading_align = RewTerm(
         func=mdp.heading_alignment_reward,
-        weight=1.0,
+        weight=2.0,
         params={"command_name": "base_velocity", "lin_cmd_threshold": 0.05, "beta": 4.0},
     )       
     
@@ -758,11 +782,36 @@ class MathRewardsCfg:
     
     masked_action_rate = RewTerm(func=mdp.masked_action_rate_l2, weight=-0.05, params={"mask_name": "dof_mask"})
     
-    masked_success_stable = RewTerm(
-        func=mdp.masked_success_stable_bonus,
-        weight=4.0,   # 2–5
-        params={"eps": 0.03, "vel_eps": 0.03, "bonus": 1.0, "mask_name": "dof_mask"},
+#    masked_success_stable = RewTerm(
+#        func=mdp.masked_success_stable_bonus,
+#        weight=100.0,
+#        params={
+#            "eps": 0.03,      # начни мягко (0.06–0.10), потом ужесточай куррикулумом до 0.02–0.03
+#            "vel_eps": 0.03,
+#            "bonus": 1.0,
+#            "mask_name": "dof_mask",
+#            
+#        },
+#    )
+    
+    idle_double_support = RewTerm(
+        func=mdp.idle_double_support_bonus,
+        weight=2.0,   # начни с 6–10
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+            ),
+            "command_name": "base_velocity",
+            "contact_force_threshold": 5.0,
+            "lin_deadband": 0.03,
+            "ang_deadband": 0.03,
+            "bonus": 1.0,
+            "leg_bits": (0, 3, 7, 11, 15, 19, 1, 4, 8, 12, 16, 20),
+        },
     )
+    
+ 
  
     
 @configclass
@@ -862,8 +911,8 @@ class MathAdaptiveCurriculum:
         lr_decay_factor: float = 10,
         delay_multiplier: float = 10,
         stage_interval: int = 1000,
-        reward_threshold: float = 3.0,
-        start_stage: int = 0	,              # ← желаемая стартовая стадия
+        reward_threshold: float = 5.0,
+        start_stage: int = 0, # 0	,              # ← желаемая стартовая стадия
     ):
         # (факультативные тренировочные параметры, оставлены как были)
         self.lr = float(initial_lr)
@@ -888,13 +937,17 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return min(0.5, 0.05 + self.stage / 5000.0)
+        return min(0.2, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0
 
     def get_miander_scale(self) -> float:
         return 1.0 # min(1.0, 0.1 + self.stage / 5000.0)
+        
+    def get_exponent_multiplicator(self) -> float:
+        # пример зависимости от стадии; подстрой при желании
+        return 0.5 # max(0.001, 1.0 - self.stage / 5000.0)        
 
     # --- внутренняя утилита: выставить start_step так, чтобы сейчас была ровно target_stage ---
     def _align_start_to_now(self, current_step: int, target_stage: int) -> None:
@@ -927,6 +980,7 @@ class MathAdaptiveCurriculum:
         new_stage = max(0, (step - self.start_step) // self.stage_interval)
         if new_stage > self.stage:
             self.stage = int(new_stage)
+            print(f"Curriculum stage: {self.stage}")
             changed = True
 
         return changed
