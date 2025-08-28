@@ -411,7 +411,7 @@ MATH_G1_CFG = ArticulationCfg(
             ".*_hip_roll_joint": 0, 
             ".*_hip_yaw_joint": 0,
              
-            ".*_knee_joint": 0.42,
+            ".*_knee_joint": 0.175, # 0.42, (10 degrees)
             ".*_ankle_pitch_joint": -0.23,
             ".*_ankle_roll_joint": 0,
             

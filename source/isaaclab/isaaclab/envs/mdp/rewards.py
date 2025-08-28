@@ -410,7 +410,7 @@ def miander_untracking_reward(
 
 
 def pelvis_height_target_reward(env: MathManagerBasedRLEnv,
-                                target: float = 0.74,
+                                target: float = 0.795, # 0.74,
                                 alpha: float = 0.2) -> torch.Tensor:
     """
     Экспоненциальная награда: r = exp(-alpha * |z - target|)

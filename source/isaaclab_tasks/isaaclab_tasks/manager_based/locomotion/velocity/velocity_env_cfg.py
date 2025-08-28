@@ -485,7 +485,7 @@ class MathRewardsCfg:
     
     miander_tracking_reward = RewTerm(
         func=mdp.miander_tracking_reward,
-        weight=10.0,
+        weight=15.0,
            
     )
 
@@ -629,7 +629,7 @@ class MathRewardsCfg:
     
     com_over_support = RewTerm(
         func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
-        weight=3.0,
+        weight=2.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -912,7 +912,7 @@ class MathAdaptiveCurriculum:
         delay_multiplier: float = 10,
         stage_interval: int = 1000,
         reward_threshold: float = 5.0,
-        start_stage: int = 0, # 0	,              # ← желаемая стартовая стадия
+        start_stage: int = 119, # 0	,              # ← желаемая стартовая стадия
     ):
         # (факультативные тренировочные параметры, оставлены как были)
         self.lr = float(initial_lr)
@@ -937,7 +937,7 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return min(0.2, 0.05 + self.stage / 5000.0)
+        return min(0.5, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0
