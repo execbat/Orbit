@@ -644,6 +644,13 @@ class MathRewardsCfg:
             # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
             "sigma"   : 0.06,
             "weighted": True,
+            
+            # new:
+            "require_both_when_idle": True,
+            "mask_name": "dof_mask",
+            "lin_deadband": 0.03,
+            "ang_deadband": 0.03,
+            "leg_bits": (0,1,3,4,7,8,11,12,15,16,19,20),
         },
     )
     
@@ -671,7 +678,7 @@ class MathRewardsCfg:
             "asset_cfg":  SceneEntityCfg("robot"),
 
             # пороги
-            "contact_force_threshold": 5.0,   # Н/стопу для «есть контакт»
+            "contact_force_threshold": 3.0,   # Н/стопу для «есть контакт»
             "lin_deadband": 0.03,             # м/с — «ноль» по лин. скорости
             "ang_deadband": 0.03,             # рад/с — «ноль» по рысканью
 
@@ -811,8 +818,27 @@ class MathRewardsCfg:
         },
     )
     
- 
- 
+    body_lin_acc_l2 = RewTerm(func=mdp.body_lin_acc_l2, weight=-2.5e-7) # НОВОЕ (при дрожи/подпрыг.) 
+
+    # --- (опционально) анти-залипание в одноопоре ---
+    prolonged_single_support = RewTerm(
+        func=mdp.prolonged_single_support_penalty,
+        weight=-2.0,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+            ),
+            "command_name": "base_velocity",
+            "contact_force_threshold": 3.0,
+            "lin_deadband": 0.03,
+            "ang_deadband": 0.03,
+            "use_mask": True,
+            "mask_name": "dof_mask",
+            "left_dofs":  (0, 3, 7, 11, 15, 19),
+            "right_dofs": (1, 4, 8, 12, 16, 20),
+        },
+    )
     
 @configclass
 class MathTeleopRewardsCfg:
@@ -910,9 +936,9 @@ class MathAdaptiveCurriculum:
         initial_lr: float = 1e-3,
         lr_decay_factor: float = 10,
         delay_multiplier: float = 10,
-        stage_interval: int = 1000,
-        reward_threshold: float = 5.0,
-        start_stage: int = 119, # 0	,              # ← желаемая стартовая стадия
+        stage_interval: int = 200, #1000
+        reward_threshold: float = 10.0,
+        start_stage: int = 719, # 0	,              # ← желаемая стартовая стадия
     ):
         # (факультативные тренировочные параметры, оставлены как были)
         self.lr = float(initial_lr)

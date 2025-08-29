@@ -410,7 +410,7 @@ def miander_untracking_reward(
 
 
 def pelvis_height_target_reward(env: MathManagerBasedRLEnv,
-                                target: float = 0.795, # 0.74,
+                                target: float = 0.8, # 795, # 0.74,
                                 alpha: float = 0.2) -> torch.Tensor:
     """
     Экспоненциальная награда: r = exp(-alpha * |z - target|)
@@ -701,60 +701,77 @@ def lateral_slip_penalty(env, command_name="base_velocity"):
     
 def com_over_support_reward_fast(
     env,
-    sensor_cfg: SceneEntityCfg,                 # ContactSensor с телами-опорами (обычно стопы)
+    sensor_cfg: SceneEntityCfg,                 # ContactSensor c телами-опорами (обычно стопы)
     asset_cfg : SceneEntityCfg = SceneEntityCfg("robot"),
     contact_force_threshold: float = 5.0,       # Н: фильтр шума
-    sigma: float = 0.06,                        # м: «радиус точности» (строгость)
+    sigma: float = 0.06,                        # м: радиус точности
     weighted: bool = True,                      # True → средняя точка взвешена силой
+    require_both_when_idle: bool = True,        # НОВОЕ: в покое требуем двухопорие
+    mask_name: str = "dof_mask",
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    leg_bits: tuple[int, ...] = (0,1,3,4,7,8,11,12,15,16,19,20),
 ) -> torch.Tensor:
     """
-    R ∈ [0,1] (shape: [N]). Максимум, когда проекция CoM в XY совпадает с
-    опорной точкой (средней/взвешенной) по контактирующим телам из sensor_cfg.
+    R ∈ [0,1]. Максимум, когда проекция CoM в XY совпадает с опорной точкой.
+    При require_both_when_idle=True: если |cmd|≈0 и ноги выключены по маске — ревард только при двухопории.
     """
     device = env.device
     robot  = env.scene[asset_cfg.name]
     cs     = env.scene.sensors[sensor_cfg.name]
 
-    # ---------- контакты (N,K) ----------
-    # net_forces_w_history: [N, hist, B, 3] → по выбранным body_ids и max по истории
+    # --- контакты (устойчиво к шуму по истории) ---
     fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,K)
-    contacts = fmag > contact_force_threshold                                                    # (N,K)
-    any_contact = contacts.any(dim=1)                                                            # (N,)
+    contacts   = fmag > contact_force_threshold                                                  # (N,K)
+    any_contact  = contacts.any(dim=1)                                                           # (N,)
+    both_down    = contacts.all(dim=1)                                                           # (N,)
 
-    # ---------- опорная точка XY (N,2) ----------
+    # --- опорная точка XY ---
     feet_xy = robot.data.body_pos_w[:, sensor_cfg.body_ids, :2]                                  # (N,K,2)
-
     if weighted:
         w = (fmag * contacts.float())                                                            # (N,K)
         w = w / w.sum(dim=1, keepdim=True).clamp_min(1e-6)
-        support_xy = (feet_xy * w.unsqueeze(-1)).sum(dim=1)                                     # (N,2)
+        support_xy = (feet_xy * w.unsqueeze(-1)).sum(dim=1)                                      # (N,2)
     else:
         m = contacts.float()
         support_xy = (feet_xy * m.unsqueeze(-1)).sum(dim=1) / m.sum(dim=1, keepdim=True).clamp_min(1e-6)
 
-    # ---------- центр масс XY (N,2) ----------
-    # если доступен com_pos_w — используем его (самый быстрый путь)
+    # --- центр масс XY ---
     if hasattr(robot.data, "com_pos_w"):
         com_xy = robot.data.com_pos_w[:, :2]
     else:
-        # fallback: по массам тел
-        pos_w = robot.data.body_pos_w[:, :, :2]                                                  # (N,B,2)
+        pos_w = robot.data.body_pos_w[:, :, :2]
         masses = None
         for attr in ("body_masses", "link_masses", "masses"):
             if hasattr(robot.data, attr):
-                masses = getattr(robot.data, attr)                                               # (N,B)
+                masses = getattr(robot.data, attr)
                 break
         if masses is None:
-            com_xy = pos_w.mean(dim=1)                                                           # грубо, без масс
+            com_xy = pos_w.mean(dim=1)
         else:
-            m = masses.unsqueeze(-1)                                                             # (N,B,1)
-            com_xy = (pos_w * m).sum(dim=1) / m.sum(dim=1).clamp_min(1e-6)                      # (N,2)
+            m = masses.unsqueeze(-1)
+            com_xy = (pos_w * m).sum(dim=1) / m.sum(dim=1).clamp_min(1e-6)
 
-    # ---------- награда ----------
-    d2 = (com_xy - support_xy).square().sum(dim=1)                                               # (N,)
+    # --- базовый ревард ---
+    d2 = (com_xy - support_xy).square().sum(dim=1)
     inv_two_sigma2 = 0.5 / (sigma * sigma)
     reward = torch.exp(-d2 * inv_two_sigma2)                                                     # (N,)
-    return torch.where(any_contact, reward, torch.zeros_like(reward))
+
+    # --- «покой + ноги выключены по маске» → разрешаем ревард только при двухопории
+    if require_both_when_idle:
+        cmd   = env.command_manager.get_term("base_velocity").command  # (N,3)
+        near0 = (cmd[:, :2].norm(dim=1) < lin_deadband) & (cmd[:, 2].abs() < ang_deadband)
+
+        dof_mask = env.command_manager.get_term(mask_name).command > 0.5
+        if not hasattr(env, "_leg_bits_tensor"):
+            env._leg_bits_tensor = torch.as_tensor(leg_bits, device=device, dtype=torch.long)
+        legs_inactive = (dof_mask[:, env._leg_bits_tensor].sum(dim=1) == 0)
+
+        gate_idle = near0 & legs_inactive
+        allow = torch.where(gate_idle, both_down, any_contact)
+        return torch.where(allow, reward, torch.zeros_like(reward))
+    else:
+        return torch.where(any_contact, reward, torch.zeros_like(reward))
     
 def no_command_motion_penalty(
     env,
@@ -841,46 +858,46 @@ def single_foot_stationary_penalty(
     env,
     sensor_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    contact_force_threshold: float = 5.0,
+    contact_force_threshold: float = 3.0,   # стало мягче (было 5.0)
     lin_deadband: float = 0.03,
     ang_deadband: float = 0.03,
     command_name: str = "base_velocity",
     use_mask: bool = True,
     mask_name: str = "dof_mask",
-    leg_bits: list[int] = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+    leg_bits: list[int] = (0,1,3,4,7,8,11,12,15,16,19,20),
     scale_by_asymmetry: bool = True,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
-    Штраф за одноопорную стойку, когда:
-      • |cmd| ≈ 0  ИЛИ  ноги «выключены» по маске.
-
-    Возврат: тензор ≥0 формы [N].
+    Штраф за одноопорную стойку ТОЛЬКО когда:
+      • |cmd| ≈ 0  И  все суставы ног выключены по маске.
     """
     device = env.device
-    robot  = env.scene[asset_cfg.name]
     cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
 
-    # --- near-zero команды ---
-    cmd   = env.command_manager.get_term(command_name).command  # (N,3): vx,vy,wz
+    # near-zero команды
+    cmd   = env.command_manager.get_term(command_name).command
     near0 = (cmd[:, :2].norm(dim=1) < lin_deadband) & (cmd[:, 2].abs() < ang_deadband)
 
-    # --- ноги выключены по маске? ---
+    # ноги выключены по маске?
     if use_mask and hasattr(env.command_manager, "get_term"):
-        dof_mask = env.command_manager.get_term(mask_name).command  # (N,J) in {0,1}
-        legs_inactive = (dof_mask[:, leg_bits].sum(dim=1) <= 0.0)
+        dof_mask = env.command_manager.get_term(mask_name).command  # (N,J)
+        if not hasattr(env, "_leg_bits_tensor2"):
+            env._leg_bits_tensor2 = torch.as_tensor(leg_bits, device=device, dtype=torch.long)
+        legs_inactive = (dof_mask[:, env._leg_bits_tensor2].sum(dim=1) <= 0.0)
     else:
         legs_inactive = torch.zeros_like(near0, dtype=torch.bool)
 
-    gate = near0 # | legs_inactive  # штрафуем, если покой ИЛИ нет команд на ноги
+    # строгий гейт
+    gate = near0 & legs_inactive
     if not gate.any():
         return torch.zeros(env.num_envs, device=device)
 
-    # --- контакты стоп из истории (устойчиво к шуму) ---
+    # контакты
     fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
-    left_contact  = fmag[:, 0] > contact_force_threshold
-    right_contact = fmag[:, 1] > contact_force_threshold
-    single_support = left_contact ^ right_contact  # XOR
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+    single_support = Lc ^ Rc
 
     pen = (single_support & gate).float()
 
@@ -1462,3 +1479,106 @@ def idle_double_support_bonus(
     both_down = Lc & Rc
 
     return bonus * (both_down & gate).float()
+    
+def prolonged_single_support_penalty(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    command_name: str = "base_velocity",
+    contact_force_threshold: float = 3.0,
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    use_mask: bool = True,
+    mask_name: str = "dof_mask",
+    # индексы ножных DOF; проверь, что соответствуют порядку joint_names
+    left_dofs:  tuple[int, ...] = (0, 3, 7, 11, 15, 19),
+    right_dofs: tuple[int, ...] = (1, 4, 8, 12, 16, 20),
+) -> torch.Tensor:
+    """
+    Штраф (0/1) по правилам:
+      A) Если |cmd|≈0 и обе ноги ПО МАСКЕ выключены → ОБЯЗАТЕЛЬНО двухопорие (обе стопы в контакте).
+      B) Если |cmd|>0 и обе ноги ПО МАСКЕ выключены → ОБЯЗАТЕЛЬНО ≥1 контакт (нет «полёта») и чередование ног
+         (две подряд «посадки» одной и той же ноги — штраф).
+      C) Если активны DOF ТОЛЬКО одной ноги (по маске) → Другая (неактивная) нога ОБЯЗАНА быть в контакте с землёй.
+         Если активны обе ноги — не штрафуем по этому правилу (даём политике свободу).
+    """
+    device = env.device
+    N = env.num_envs
+    cs: ContactSensor = env.scene.sensors[sensor_cfg.name]
+
+    # --- команды движения ---
+    cmd = env.command_manager.get_term(command_name).command  # (N,3)
+    lin_mag = cmd[:, :2].norm(dim=1)
+    ang_mag = cmd[:, 2].abs()
+    move_gate = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)
+    idle_gate = ~move_gate
+
+    # --- активность масок по ногам ---
+    if use_mask:
+        dof_mask = (env.command_manager.get_term(mask_name).command > 0.5)  # (N,J) bool
+        Lidx = torch.as_tensor(left_dofs,  device=device, dtype=torch.long)
+        Ridx = torch.as_tensor(right_dofs, device=device, dtype=torch.long)
+        active_L = dof_mask[:, Lidx].any(dim=1)  # (N,)
+        active_R = dof_mask[:, Ridx].any(dim=1)  # (N,)
+    else:
+        # если маски не используем — считаем обе ноги «неактивными» для правил A/B
+        active_L = torch.zeros(N, dtype=torch.bool, device=device)
+        active_R = torch.zeros(N, dtype=torch.bool, device=device)
+
+    legs_inactive = ~(active_L | active_R)   # обе ноги выключены
+    legs_one_side = active_L ^ active_R      # активна ровно одна нога
+
+    # --- контакты стоп (устойчиво к шуму: максимум по истории) ---
+    fmag = cs.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :].norm(dim=-1).amax(dim=1)  # (N,2)
+    Lc = fmag[:, 0] > contact_force_threshold
+    Rc = fmag[:, 1] > contact_force_threshold
+    both   = Lc & Rc
+    anyc   = Lc | Rc
+    single = Lc ^ Rc
+    flight = ~anyc
+
+    # ---------------------------
+    # A) Покой + обе ноги выключены → требуем двухопорие
+    pen_idle_two = (idle_gate & legs_inactive & ~both).float()
+
+    # ---------------------------
+    # B) Движение + обе ноги выключены → запрет полёта + чередование
+    pen_move_flight = (move_gate & legs_inactive & flight).float()
+
+    # Чередование: штраф, если два подряд касания одной и той же ноги
+    if not hasattr(env, "_pl_prev_Lc"):
+        env._pl_prev_Lc   = torch.zeros(N, dtype=torch.bool, device=device)
+        env._pl_prev_Rc   = torch.zeros(N, dtype=torch.bool, device=device)
+        env._pl_last_touch= torch.full((N,), -1, dtype=torch.long, device=device)  # -1=нет, 0=L, 1=R
+
+    rise_L = Lc & ~env._pl_prev_Lc
+    rise_R = Rc & ~env._pl_prev_Rc
+    touch_now = torch.full((N,), -1, dtype=torch.long, device=device)
+    only_L = rise_L & ~rise_R
+    only_R = rise_R & ~rise_L
+    touch_now[only_L] = 0
+    touch_now[only_R] = 1
+
+    same_touch = (touch_now == env._pl_last_touch) & (touch_now >= 0)
+    pen_move_alt = (move_gate & legs_inactive & same_touch).float()
+
+    upd = touch_now >= 0
+    env._pl_last_touch[upd] = touch_now[upd]
+    env._pl_prev_Lc = Lc
+    env._pl_prev_Rc = Rc
+
+    # ---------------------------
+    # C) Активна ровно одна нога → другая (неактивная) ОБЯЗАНА стоять на земле
+    # если активна только левая — правая должна быть в контакте; если только правая — левая.
+    pen_one_leg_cmd = ((legs_one_side &  active_L & ~active_R & ~Rc) |
+                       (legs_one_side & ~active_L &  active_R & ~Lc)).float()
+
+    # --- ресеты на границах эпизодов ---
+    resets = env.termination_manager.terminated | env.termination_manager.time_outs
+    if resets.any():
+        env._pl_prev_Lc[resets]    = False
+        env._pl_prev_Rc[resets]    = False
+        env._pl_last_touch[resets] = -1
+
+    # --- суммарный штраф ---
+    penalty = pen_idle_two + pen_move_flight + pen_move_alt + pen_one_leg_cmd
+    return penalty.clamp(0.0, 1.0)
