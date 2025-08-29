@@ -124,7 +124,7 @@ class MathCommandsCfg:
 
     target_joint_pose = mdp.UniformVectorCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.0, 0.0),
+        resampling_time_range=(0.1, 15.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -137,7 +137,7 @@ class MathCommandsCfg:
     
     dof_mask = mdp.BernoulliMaskCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.0, 0.0),
+        resampling_time_range=(0.1, 15.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -938,7 +938,7 @@ class MathAdaptiveCurriculum:
         delay_multiplier: float = 10,
         stage_interval: int = 200, #1000
         reward_threshold: float = 10.0,
-        start_stage: int = 719, # 0	,              # ← желаемая стартовая стадия
+        start_stage: int = 0, # 0	,              # ← желаемая стартовая стадия
     ):
         # (факультативные тренировочные параметры, оставлены как были)
         self.lr = float(initial_lr)
