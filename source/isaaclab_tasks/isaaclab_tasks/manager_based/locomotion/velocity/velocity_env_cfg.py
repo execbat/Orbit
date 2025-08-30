@@ -124,7 +124,7 @@ class MathCommandsCfg:
 
     target_joint_pose = mdp.UniformVectorCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.1, 15.0),
+        resampling_time_range=(10.0, 10.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -137,7 +137,7 @@ class MathCommandsCfg:
     
     dof_mask = mdp.BernoulliMaskCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.1, 15.0),
+        resampling_time_range=(10.0, 10.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -167,7 +167,7 @@ class MathTeleopCommandsCfg:
 
     target_joint_pose = mdp.UniformVectorCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.0, 0.0),
+        resampling_time_range=(9999999999999999.0, 9999999999999999.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -180,7 +180,7 @@ class MathTeleopCommandsCfg:
     
     dof_mask = mdp.BernoulliMaskCommandCfg(
         asset_name="robot",
-        resampling_time_range=(0.0, 0.0),
+        resampling_time_range=(9999999999999999.0, 9999999999999999.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -520,7 +520,7 @@ class MathRewardsCfg:
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
     dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-2.5e-7)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.05)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
@@ -627,32 +627,32 @@ class MathRewardsCfg:
         params={"command_name": "base_velocity"}
     )
     
-    com_over_support = RewTerm(
-        func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
-        weight=2.0,
-        params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                # выбери один вариант:
-                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # точные имена
-                # или — если хочешь по маске:
-                # body_names=".*_ankle_roll_link",
-            ),
-            "asset_cfg": SceneEntityCfg("robot"),
-            "contact_force_threshold": 5.0,
-            # вместо старого `sigma` теперь используем eps_half
-            # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
-            "sigma"   : 0.06,
-            "weighted": True,
-            
-            # new:
-            "require_both_when_idle": True,
-            "mask_name": "dof_mask",
-            "lin_deadband": 0.03,
-            "ang_deadband": 0.03,
-            "leg_bits": (0,1,3,4,7,8,11,12,15,16,19,20),
-        },
-    )
+#    com_over_support = RewTerm(
+#        func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
+#        weight=2.0,
+#        params={
+#            "sensor_cfg": SceneEntityCfg(
+#                "contact_forces",
+#                # выбери один вариант:
+#                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # точные имена
+#                # или — если хочешь по маске:
+#                # body_names=".*_ankle_roll_link",
+#            ),
+#            "asset_cfg": SceneEntityCfg("robot"),
+#            "contact_force_threshold": 5.0,
+#            # вместо старого `sigma` теперь используем eps_half
+#            # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
+#            "sigma"   : 0.06,
+#            "weighted": True,
+#            
+#            # new:
+#            "require_both_when_idle": True,
+#            "mask_name": "dof_mask",
+#            "lin_deadband": 0.03,
+#            "ang_deadband": 0.03,
+#            "leg_bits": (0,1,3,4,7,8,11,12,15,16,19,20),
+#        },
+#    )
     
     limit_saturation = RewTerm(
         func=mdp.joint_limit_saturation_penalty,
@@ -745,27 +745,27 @@ class MathRewardsCfg:
         },
     )    
     
-    same_lead_penalty = RewTerm(
-        func=mdp.alternating_same_lead_penalty,
-        weight=-0.5,   # стартово -1.5…-3.0
-        params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
-            ),
-            "asset_cfg":  SceneEntityCfg("robot"),
-            "command_name": "base_velocity",
-
-            "lin_cmd_threshold": 0.05,
-            "use_mask": True,
-            "mask_name": "dof_mask",
-            "leg_bits": [0,1,3,4,7,8,11,12,15,16,19,20],
-
-            "contact_force_threshold": 5.0,
-            "step_gain": 0.40,
-            "beta_stride": 3.0,
-        },
-    )   
+#    same_lead_penalty = RewTerm(
+#        func=mdp.alternating_same_lead_penalty,
+#        weight=-0.5,   # стартово -1.5…-3.0
+#        params={
+#            "sensor_cfg": SceneEntityCfg(
+#                "contact_forces",
+#                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+#            ),
+#            "asset_cfg":  SceneEntityCfg("robot"),
+#            "command_name": "base_velocity",
+#
+#            "lin_cmd_threshold": 0.05,
+#            "use_mask": True,
+#            "mask_name": "dof_mask",
+#            "leg_bits": [0,1,3,4,7,8,11,12,15,16,19,20],
+#
+#            "contact_force_threshold": 5.0,
+#            "step_gain": 0.40,
+#            "beta_stride": 3.0,
+#        },
+#    )   
     
     
     heading_align = RewTerm(
@@ -787,7 +787,7 @@ class MathRewardsCfg:
         },
     )
     
-    masked_action_rate = RewTerm(func=mdp.masked_action_rate_l2, weight=-0.05, params={"mask_name": "dof_mask"})
+    masked_action_rate = RewTerm(func=mdp.masked_action_rate_l2, weight=-0.01, params={"mask_name": "dof_mask"})
     
 #    masked_success_stable = RewTerm(
 #        func=mdp.masked_success_stable_bonus,
@@ -839,6 +839,35 @@ class MathRewardsCfg:
             "right_dofs": (1, 4, 8, 12, 16, 20),
         },
     )
+
+    target_proximity = RewTerm(
+        func=mdp.masked_target_proximity_reward,
+        weight=100.0,   
+        params=dict(
+            mask_name="dof_mask",
+            tol=0.5,
+            r_at_tol=0.0,
+            r_at_zero=1.0,
+            zero_if_no_active=True,
+        ),
+    )
+
+    unmasked_init_proximity = RewTerm(
+        func=mdp.unmasked_init_proximity_reward,
+        weight=10.0,
+        params=dict(
+            mask_name="dof_mask",
+            tol=0.3,
+            r_at_tol=0.0,
+            r_at_zero=1.0,
+            zero_if_no_inactive=True,
+            command_name="base_velocity",   # если в телеметрии другое имя — подставь его
+            lin_deadband=0.03,
+            ang_deadband=0.03,
+            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+        ),
+    )
+
     
 @configclass
 class MathTeleopRewardsCfg:
@@ -963,7 +992,7 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return min(0.5, 0.05 + self.stage / 5000.0)
+        return 0.5 # min(0.5, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0

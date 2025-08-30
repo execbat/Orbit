@@ -1582,3 +1582,138 @@ def prolonged_single_support_penalty(
     # --- суммарный штраф ---
     penalty = pen_idle_two + pen_move_flight + pen_move_alt + pen_one_leg_cmd
     return penalty.clamp(0.0, 1.0)
+    
+def masked_target_proximity_reward(
+    env,
+    mask_name: str = "dof_mask",
+    tol: float = 0.2,          # верхняя граница диапазона выплат в норм. координатах [-1,1]
+    r_at_tol: float = 20.0,    # награда при MAE == tol
+    r_at_zero: float = 100.0,  # награда при MAE == 0
+    zero_if_no_active: bool = True,  # если маска пустая — давать 0
+):
+    """
+    Награда за близость к таргету по активным DOF:
+      - средняя |ошибка| по маске <= tol -> линейная награда от r_at_tol до r_at_zero
+      - средняя |ошибка| > tol          -> 0
+    """
+    robot = env.scene["robot"]
+    q = robot.data.joint_pos
+
+    # нормируем позы в [-1, 1] по мягким лимитам
+    qmin = robot.data.soft_joint_pos_limits[..., 0]
+    qmax = robot.data.soft_joint_pos_limits[..., 1]
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn   = (q - mid) * scl
+
+    # берём таргеты и маску
+    tgt = env.command_manager.get_term("target_joint_pose").command
+    msk = env.command_manager.get_term(mask_name).command > 0.5  # (N, D) bool
+
+    # |ошибка| по осям и средняя по активным DOF
+    err = (qn - tgt).abs()
+    active_cnt = msk.sum(dim=1)  # (N,)
+    mae = (err * msk).sum(dim=1) / active_cnt.clamp_min(1)
+
+    # линейная интерполяция: mae∈[0, tol] → reward∈[r_at_zero, r_at_tol]
+    slope = (r_at_zero - r_at_tol) / max(tol, 1e-6)  # >0, напр. 80/0.2=400
+    r = r_at_zero - slope * mae                      # 100 - 400*mae
+
+    # выплачиваем только в диапазоне mae <= tol, иначе 0
+    r = torch.where(mae <= tol, r, torch.zeros_like(r))
+
+    # если нет активных осей — по умолчанию 0, чтобы не раздавать r_at_zero "бесплатно"
+    if zero_if_no_active:
+        r = torch.where(active_cnt > 0, r, torch.zeros_like(r))
+
+    return r    
+    
+def unmasked_init_proximity_reward(
+    env,
+    mask_name: str = "dof_mask",
+    tol: float = 0.2,
+    r_at_tol: float = 0.0,
+    r_at_zero: float = 1.0,
+    zero_if_no_inactive: bool = True,
+    init_attr: str = "JOINT_INIT_POS_NORM",
+    # новое:
+    command_name: str = "base_velocity",
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    leg_bits = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),  # индексы DOF ног
+):
+    """
+    Награда за близость к ИНИТУ на немаскированных DOF.
+    Если есть команда на движение, оси ног (leg_bits) исключаются из расчёта.
+    """
+    robot = env.scene["robot"]
+    q = robot.data.joint_pos                      # (N, D)
+    device, dtype = q.device, q.dtype
+
+    # нормировка поз в [-1, 1]
+    qmin = robot.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = robot.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn   = (q - mid) * scl                        # (N, D)
+
+    # маска
+    msk = env.command_manager.get_term(mask_name).command > 0.5
+    msk = msk.to(device=device)                   # (N, D) bool
+    inv = ~msk                                    # немаскированные DOF
+
+    # --- детект "есть команда на движение" ---
+    moving = None
+    try:
+        cmd = env.command_manager.get_term(command_name).command
+        cmd = torch.as_tensor(cmd, dtype=dtype, device=device)   # (N, C)
+        # берём линейную часть из первых двух компонент (если есть) и yaw из 3-й (если есть)
+        lin_mag = torch.zeros(cmd.shape[0], device=device, dtype=dtype)
+        if cmd.shape[1] >= 2:
+            lin_mag = (cmd[:, 0]**2 + cmd[:, 1]**2).sqrt()
+        ang_mag = torch.zeros_like(lin_mag)
+        if cmd.shape[1] >= 3:
+            ang_mag = cmd[:, 2].abs()
+        moving = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)  # (N,)
+    except Exception:
+        # если команды нет — считаем, что движения нет
+        moving = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
+
+    # --- исключаем leg_bits из расчёта, когда есть команда на движение ---
+    if leg_bits is not None and len(leg_bits) > 0:
+        leg_mask_1d = torch.zeros(q.shape[1], dtype=torch.bool, device=device)
+        leg_mask_1d[list(leg_bits)] = True                     # (D,)
+        drop = moving.unsqueeze(1) & leg_mask_1d.unsqueeze(0)  # (N, D)
+        inv = inv & ~drop
+
+    # --- нормированный инит (кэш на нужном девайсе) ---
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        init_q = getattr(robot.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)  # (D,)
+            init_qn = (init_q - mid) * scl                                # (D,)
+            if init_qn.dim() == 1:
+                init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)    # (N, D)
+        else:
+            init_qn = qn.detach().clone()
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)
+
+    # --- MAE по немаскированным (после исключения ног при движении) ---
+    err = (qn - init_qn).abs()
+    inactive_cnt = inv.sum(dim=1)                                # (N,)
+    mae = (err * inv).sum(dim=1) / inactive_cnt.clamp_min(1)
+
+    # линейная шкала выплат: mae∈[0, tol] → [r_at_zero, r_at_tol], иначе 0
+    slope = (r_at_zero - r_at_tol) / max(tol, 1e-6)
+    r = r_at_zero - slope * mae
+    r = torch.where(mae <= tol, r, torch.zeros_like(r))
+
+    if zero_if_no_inactive:
+        r = torch.where(inactive_cnt > 0, r, torch.zeros_like(r))
+
+    return r
