@@ -196,7 +196,7 @@ class G1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.robot = G1_MINIMAL_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
         
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
 
         # Randomization
         self.events.push_robot = None
@@ -248,7 +248,7 @@ class G1RoughEnvCfg_PLAY(G1RoughEnvCfg):
         # make a smaller scene for play
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
         # spawn the robot randomly in the grid (instead of their terrain levels)
         self.scene.terrain.max_init_terrain_level = None
         # reduce the number of terrains to save memory
@@ -282,7 +282,7 @@ class MathG1RoughEnvCfg(MathLocomotionVelocityRoughEnvCfg):
         # self.scene.robot = MATH_G1_23DF_CFG
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
         
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
 
         # Randomization
         self.events.push_robot = None
@@ -343,7 +343,7 @@ class MathTeleopG1RoughEnvCfg_PLAY(MathTeleopLocomotionVelocityRoughEnvCfg):
         # self.scene.robot = MATH_G1_23DF_CFG
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
         
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
 
         # Randomization
         self.events.push_robot = None

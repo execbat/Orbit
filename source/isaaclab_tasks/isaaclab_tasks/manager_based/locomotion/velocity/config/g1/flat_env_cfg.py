@@ -68,7 +68,7 @@ class MathG1FlatEnvCfg(MathG1RoughEnvCfg):
         self.scene.terrain.terrain_generator = None
         # no height scan
         self.scene.height_scanner = None
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
         self.observations.policy.height_scan = None
         # no terrain curriculum
         self.curriculum.terrain_levels = None
@@ -106,7 +106,7 @@ class MathTeleopG1FlatEnvCfg_PLAY(MathTeleopG1RoughEnvCfg_PLAY):
         self.scene.terrain.terrain_generator = None
         # no height scan
         self.scene.height_scanner = None
-        self.episode_length_s = 10.0
+        self.episode_length_s = 40.0
         self.observations.policy.height_scan = None
         # no terrain curriculum
         self.curriculum.terrain_levels = None

@@ -99,7 +99,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         self.NUM_AXIS = 23
         self.MAX_PERIOD = 5.0
         self.MIN_PERIOD = 0.5
-        self.MASK_PROB_LEVEL = 0.1  
+        self.MASK_PROB_LEVEL = 0.05 
         self.EXPONENT_MULTIPLOCATOR = 1.0
         
         self.size = (cfg.scene.num_envs, self.NUM_AXIS)         
@@ -463,7 +463,8 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         if "reset" in self.event_manager.available_modes:
             env_step_count = self._sim_step_counter // self.cfg.decimation
             self.event_manager.apply(mode="reset", env_ids=env_ids, global_env_step_count=env_step_count)
-            
+           
+        # # # # #     
         self._apply_init_pose(torch.as_tensor(env_ids, device=self.device, dtype=torch.long))              
             
 
@@ -483,7 +484,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         
         ###########
         # Curriculum update logic
-        mean_tracking_reward = info['Episode_Reward/miander_tracking_reward'].mean().item()
+        mean_tracking_reward = info['Episode_Reward/target_proximity_exp_vel'].mean().item()
         self._update_adaptive_curriculum(mean_tracking_reward)
         
         # проброс нового лернинг рейта наверх
@@ -730,17 +731,52 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
     def _apply_init_pose(self, env_ids: torch.Tensor):
         robot = self.scene["robot"]
         dev   = self.device
+
+        # init в нормализованных координатах [-1, 1]
         init_n = self.JOINT_INIT_POS_NORM.to(dev).unsqueeze(0).expand(len(env_ids), -1)  # (k,J)
 
+        # soft limits -> радианы
         qmin = robot.data.soft_joint_pos_limits[env_ids, :, 0]
         qmax = robot.data.soft_joint_pos_limits[env_ids, :, 1]
         mid  = 0.5 * (qmin + qmax)
         half = 0.5 * (qmax - qmin)
 
+        # целевая поза (радианы)
         q_des = mid + half * init_n
+
+        # === DEBUG PRINT (только для первого env из env_ids) ===
+        try:
+            eid_local = 0                     # индекс в переданном списке env_ids
+            eid = int(env_ids[eid_local])     # глобальный id среды
+            names = getattr(robot.data, "joint_names", [f"joint_{i}" for i in range(q_des.shape[1])])
+
+            q_des_rad = q_des[eid_local].detach().cpu()
+            q_des_deg = torch.rad2deg(q_des_rad)
+
+            qmin_deg = torch.rad2deg(qmin[eid_local].detach().cpu())
+            qmax_deg = torch.rad2deg(qmax[eid_local].detach().cpu())
+
+            init_n0  = init_n[eid_local].detach().cpu()
+
+            mid0  = mid[eid_local].detach().cpu()
+            half0 = half[eid_local].detach().cpu()
+            # обратная нормализация: (q_des - mid)/half -> должна совпасть с init_n
+            init_n_recon = (q_des_rad - mid0) / (half0 + 1e-12)
+            max_err = (init_n_recon - init_n0).abs().max().item()
+
+            torch.set_printoptions(precision=4, linewidth=200)
+            #print(f"\n[INIT→RAD/DEG CHECK] env {eid} | max_norm_error={max_err:.3e}")
+            #for j in range(q_des_rad.numel()):
+            #    name = names[j] if j < len(names) else f"joint_{j}"
+            #    print(f"{j:02d} {name:>28s}  n={init_n0[j]:+6.3f}  "
+            #          f"rad={q_des_rad[j]:+7.4f}  deg={q_des_deg[j]:+8.2f}  "
+            #          f"min/max(deg)=({qmin_deg[j]:+7.2f},{qmax_deg[j]:+7.2f})")
+        except Exception as e:
+            print(f"[INIT DEBUG PRINT] skipped due to: {e}")
+
+        # применяем позу и сбрасываем скорости
         robot.data.joint_pos[env_ids, :] = q_des
         robot.data.joint_vel[env_ids, :] = 0.0
         robot.data.root_lin_vel_w[env_ids, :] = 0.0
-        robot.data.root_ang_vel_w[env_ids, :] = 0.0                        
-            
-            
+        robot.data.root_ang_vel_w[env_ids, :] = 0.0
+

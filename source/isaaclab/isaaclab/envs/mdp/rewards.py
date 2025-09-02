@@ -322,89 +322,117 @@ def track_ang_vel_z_exp(
 ##################################    
 # AnimalMath bonus for repeatability of external target
     
-def miander_tracking_reward(env) -> torch.Tensor:
+def miander_tracking_reward_exp(
+    env,
+    std: float = 0.25,                 # ширина колокола в НОРМИРОВАННЫХ [-1,1] единицах
+    mask_name: str = "dof_mask",
+    target_name: str = "target_joint_pose",
+) -> torch.Tensor:
     """
-    [0 … 1] — награда за совпадение активных DOF с целями.
+    Экспоненциальный трекинг активных DOF к таргету:
+        reward = exp( - MSE_active / std^2 )
 
-    • mask  = dof_mask  (1 → активная ось)
-    • target= target_joint_pose
-    • reward = 1 − MSE/4
+    • mask=1 → DOF участвуют в ошибке; mask=0 → игнор
+    • позиции нормируются в [-1,1] по soft-лимитам
+    • если активных DOF нет → возвращаем 0
     """
     asset = env.scene["robot"]
+    q      = asset.data.joint_pos
+    device, dtype = q.device, q.dtype
 
-    # --- команды ----------------------------------------------------
-    mask_cmd    = env.command_manager.get_term("dof_mask").command          # (N,J)
-    target_cmd  = env.command_manager.get_term("target_joint_pose").command # (N,J)
-    
-    # print(f"mask_cmd {mask_cmd}")
-    # print(f"target_cmd {target_cmd}")
-    # print()
+    # команды
+    mask_cmd   = env.command_manager.get_term(mask_name).command
+    target_cmd = env.command_manager.get_term(target_name).command
+    mask   = (mask_cmd > 0.5).to(device=device)                             # (N,J) bool
+    target = torch.as_tensor(target_cmd, dtype=dtype, device=device)        # (N,J)
 
-    # bool-маска активных DOF
-    mask = mask_cmd > 0.5
+    # нормированные текущие углы [-1,1]
+    qmin   = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax   = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    offset = 0.5 * (qmin + qmax)
+    norm   = 2.0 * (q - offset) / (qmax - qmin + 1e-6)                      # (N,J)
 
-    # --- нормализованные текущие углы ------------------------------
-    joint_pos = asset.data.joint_pos
-    joint_min = asset.data.soft_joint_pos_limits[..., 0]
-    joint_max = asset.data.soft_joint_pos_limits[..., 1]
-    offset    = (joint_min + joint_max) * 0.5
-    norm_pos  = 2.0 * (joint_pos - offset) / (joint_max - joint_min + 1e-6)
+    # MSE по активным DOF
+    se        = (norm - target).pow(2)                                      # (N,J)
+    active_n  = mask.sum(dim=1)                                             # (N,)
+    mse       = (se * mask).sum(dim=1) / active_n.clamp_min(1)              # (N,)
 
-    # --- MSE только по активным DOF --------------------------------
-    se        = (norm_pos - target_cmd).pow(2)
-    se_masked = se * mask
-    active_n  = mask.sum(dim=1)                          # (N,)
-
-    mse = torch.where(
-        active_n > 0,
-        se_masked.sum(dim=1) / active_n.clamp(min=1),
-        torch.zeros_like(active_n, dtype=se.dtype),
-    )
-
-    # --- reward -----------------------------------------------------
-    reward = torch.where(
-        active_n > 0,
-        1.0 - mse / 4.0,
-        torch.zeros_like(mse),
-    ).clamp_(0.0, 1.0)
-
-    return reward # - 0.5        # если нужен сдвиг
-
+    # экспоненциальная награда
+    r = torch.exp(-mse / (std ** 2))
+    r = torch.where(active_n > 0, r, torch.zeros_like(r))
+    return r
 
 
 
     
-def miander_untracking_reward(
+def miander_untracking_reward_exp(
     env,
+    std: float = 0.25,                           # ширина «колокола» в НОРМИРОВАННЫХ [-1,1] ед.
     command_name: str = "base_velocity",
     lin_cmd_threshold: float = 0.05,
     leg_bits: tuple[int, ...] = (0,1,3,4,7,8,11,12,15,16,19,20),
+    mask_name: str = "dof_mask",
+    init_attr: str = "JOINT_INIT_POS_NORM",
 ) -> torch.Tensor:
+    """
+    Экспоненциальная награда за «удержание инита» на НЕмаскированных DOF:
+        r = exp( - MSE_inactive / std^2 )
+
+    • маска=0 → DOF участвуют (к иниту), маска=1 → игнор
+    • при наличии команды на движение — вклад суставов ног (leg_bits) обнуляется
+    • позы нормируются в [-1,1] по soft-лимитам
+    """
     asset = env.scene["robot"]
-    mask_cmd = env.command_manager.get_term("dof_mask").command         # (N,J)
-    inverse_mask = mask_cmd <= 0.5                                      # неактивные
-
     q = asset.data.joint_pos
-    qmin = asset.data.soft_joint_pos_limits[..., 0]
-    qmax = asset.data.soft_joint_pos_limits[..., 1]
-    qn = 2.0 * (q - (qmin + qmax) * 0.5) / (qmax - qmin + 1e-6)
+    device, dtype = q.device, q.dtype
 
-    init_norm = env.JOINT_INIT_POS_NORM.to(qn.device).unsqueeze(0)      # (1,J)
-    se = (qn - init_norm).pow(2)
+    # --- маска (inactive = !mask) ---
+    mask_cmd = env.command_manager.get_term(mask_name).command
+    inverse_mask = (mask_cmd <= 0.5).to(device=device)                 # (N,J) bool
 
-    # --- движение вперёд? → выключаем вклад суставов ног из этого терма
+    # --- нормированные текущие углы [-1,1] ---
+    qmin = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    offset = 0.5 * (qmin + qmax)
+    qn = 2.0 * (q - offset) / (qmax - qmin + 1e-6)                     # (N,J)
+
+    # --- нормированный инит (1,J) или (N,J), на нужном девайсе ---
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        # если нет кэша — попробуем default_joint_pos; иначе возьмём qn как инит
+        init_q = getattr(asset.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)     # (J,)
+            init_qn = 2.0 * (init_q - offset) / (qmax - qmin + 1e-6)         # (J,)
+            init_qn = init_qn.unsqueeze(0)                                    # (1,J)
+        else:
+            init_qn = qn.detach().mean(dim=0, keepdim=True)                   # (1,J)
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0)                                    # (1,J)
+
+    # --- исключаем ноги при движении ---
     cmd = env.command_manager.get_term(command_name).command
-    move_gate = cmd[:, :2].norm(dim=1) > lin_cmd_threshold              # (N,)
-    W = inverse_mask.float()                                            # (N,J)
-    if move_gate.any():
+    cmd = torch.as_tensor(cmd, dtype=dtype, device=device)                    # (N, C)
+    move_gate = cmd[:, :2].norm(dim=1) > lin_cmd_threshold                    # (N,)
+
+    W = inverse_mask.float()                                                  # (N,J)
+    if move_gate.any() and leg_bits:
         if not hasattr(env, "_leg_bits_tensor"):
-            env._leg_bits_tensor = torch.as_tensor(leg_bits, device=env.device, dtype=torch.long)
+            env._leg_bits_tensor = torch.as_tensor(leg_bits, device=device, dtype=torch.long)
         W[move_gate][:, env._leg_bits_tensor] = 0.0
 
-    se_masked = se * W
-    denom = W.sum(dim=1).clamp_min(1.0)
-    mse = se_masked.sum(dim=1) / denom
-    return (1.0 - mse / 4.0).clamp(0.0, 1.0)
+    # --- MSE по немаскированным (после обнуления ног при движении) ---
+    se = (qn - init_qn).pow(2)                                                # (N,J)
+    denom = W.sum(dim=1)                                                      # (N,)
+    mse = (se * W).sum(dim=1) / denom.clamp_min(1.0)                          # (N,)
+
+    # --- экспоненциальная награда ---
+    r = torch.exp(-mse / (std ** 2))
+    r = torch.where(denom > 0, r, torch.zeros_like(r))                        # если нечего оценивать → 0
+    return r
 
 
 
@@ -636,7 +664,90 @@ def masked_progress_reward(env, eps=0.0, neg_scale: float = 0.1, mask_name: str 
     cnt  = msk.sum(dim=1).clamp_min(1)
     r    = prog.sum(dim=1) / cnt
     return r.clamp(-1.0, 1.0)
-    
+
+def unmasked_progress_to_init_reward(
+    env,
+    eps: float = 0.0,
+    neg_scale: float = 0.1,
+    mask_name: str = "dof_mask",
+    # исключаем ноги при движении:
+    command_name: str = "base_velocity",
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    leg_bits = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+    # где хранится нормированный инит:
+    init_attr: str = "JOINT_INIT_POS_NORM",
+):
+    robot = env.scene["robot"]
+    q, qd = robot.data.joint_pos, robot.data.joint_vel
+    device, dtype = q.device, q.dtype
+
+    # нормировка поз/скоростей в [-1, 1]
+    qmin = robot.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = robot.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn, qdn = (q - mid) * scl, qd * scl
+
+    # маска: берём НЕмаскированные DOF
+    msk = env.command_manager.get_term(mask_name).command > 0.5
+    msk = msk.to(device=device)
+    inv = ~msk  # то, что оцениваем
+
+    # если есть команда на движение — исключаем DOF ног из расчёта
+    try:
+        cmd = env.command_manager.get_term(command_name).command
+        cmd = torch.as_tensor(cmd, dtype=dtype, device=device)   # (N, C)
+        lin_mag = torch.zeros(cmd.shape[0], device=device, dtype=dtype)
+        if cmd.shape[1] >= 2:
+            lin_mag = (cmd[:, 0]**2 + cmd[:, 1]**2).sqrt()
+        ang_mag = torch.zeros_like(lin_mag)
+        if cmd.shape[1] >= 3:
+            ang_mag = cmd[:, 2].abs()
+        moving = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)  # (N,)
+    except Exception:
+        moving = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
+
+    if leg_bits:
+        leg_mask_1d = torch.zeros(q.shape[1], dtype=torch.bool, device=device)
+        leg_mask_1d[list(leg_bits)] = True
+        drop = moving.unsqueeze(1) & leg_mask_1d.unsqueeze(0)  # (N, D)
+        inv = inv & ~drop
+
+    # нормированный инит (кэшируется на нужном девайсе)
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        init_q = getattr(robot.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)  # (D,)
+            init_qn = (init_q - mid) * scl                                # (D,)
+            if init_qn.dim() == 1:
+                init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)    # (N, D)
+        else:
+            init_qn = qn.detach().clone()
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)
+
+    # прогресс к инициальной позе: >0, если |err| уменьшается
+    err  = qn - init_qn
+    prog = -(err * qdn)
+
+    # мёртвая зона против дрожи
+    if eps > 0.0:
+        prog = torch.sign(prog) * torch.clamp(prog.abs() - eps, min=0.0)
+
+    # ослабляем «регресс»
+    prog = torch.where(prog >= 0.0, prog, neg_scale * prog)
+
+    # учитываем только выбранные DOF, остальным — 0 вклад
+    prog = torch.where(inv, prog, torch.zeros_like(prog))
+
+    cnt = inv.sum(dim=1).clamp_min(1)
+    r   = prog.sum(dim=1) / cnt
+    return r.clamp(-1.0, 1.0)    
     
 def unmasked_stillness_penalty(
     env,
@@ -1583,137 +1694,317 @@ def prolonged_single_support_penalty(
     penalty = pen_idle_two + pen_move_flight + pen_move_alt + pen_one_leg_cmd
     return penalty.clamp(0.0, 1.0)
     
-def masked_target_proximity_reward(
+def masked_target_proximity_reward_exp_vel(
     env,
     mask_name: str = "dof_mask",
-    tol: float = 0.2,          # верхняя граница диапазона выплат в норм. координатах [-1,1]
-    r_at_tol: float = 20.0,    # награда при MAE == tol
-    r_at_zero: float = 100.0,  # награда при MAE == 0
-    zero_if_no_active: bool = True,  # если маска пустая — давать 0
-):
-    """
-    Награда за близость к таргету по активным DOF:
-      - средняя |ошибка| по маске <= tol -> линейная награда от r_at_tol до r_at_zero
-      - средняя |ошибка| > tol          -> 0
-    """
-    robot = env.scene["robot"]
-    q = robot.data.joint_pos
-
-    # нормируем позы в [-1, 1] по мягким лимитам
-    qmin = robot.data.soft_joint_pos_limits[..., 0]
-    qmax = robot.data.soft_joint_pos_limits[..., 1]
-    mid  = 0.5 * (qmin + qmax)
-    scl  = 2.0 / (qmax - qmin + 1e-6)
-    qn   = (q - mid) * scl
-
-    # берём таргеты и маску
-    tgt = env.command_manager.get_term("target_joint_pose").command
-    msk = env.command_manager.get_term(mask_name).command > 0.5  # (N, D) bool
-
-    # |ошибка| по осям и средняя по активным DOF
-    err = (qn - tgt).abs()
-    active_cnt = msk.sum(dim=1)  # (N,)
-    mae = (err * msk).sum(dim=1) / active_cnt.clamp_min(1)
-
-    # линейная интерполяция: mae∈[0, tol] → reward∈[r_at_zero, r_at_tol]
-    slope = (r_at_zero - r_at_tol) / max(tol, 1e-6)  # >0, напр. 80/0.2=400
-    r = r_at_zero - slope * mae                      # 100 - 400*mae
-
-    # выплачиваем только в диапазоне mae <= tol, иначе 0
-    r = torch.where(mae <= tol, r, torch.zeros_like(r))
-
-    # если нет активных осей — по умолчанию 0, чтобы не раздавать r_at_zero "бесплатно"
-    if zero_if_no_active:
-        r = torch.where(active_cnt > 0, r, torch.zeros_like(r))
-
-    return r    
-    
-def unmasked_init_proximity_reward(
-    env,
-    mask_name: str = "dof_mask",
-    tol: float = 0.2,
-    r_at_tol: float = 0.0,
-    r_at_zero: float = 1.0,
-    zero_if_no_inactive: bool = True,
+    std_pos: float = 0.25,     # радиус в u-пространстве (доля сегмента init→target)
+    std_vel: float = 0.25,     # радиус по скорости (как раньше, в норм. ед./с)
+    w_pos: float = 1.0,
+    w_vel: float = 1.0,
+    gate: float = 0.25,        # гейт скорости по близости к цели в u-пространстве
     init_attr: str = "JOINT_INIT_POS_NORM",
-    # новое:
-    command_name: str = "base_velocity",
-    lin_deadband: float = 0.03,
-    ang_deadband: float = 0.03,
-    leg_bits = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),  # индексы DOF ног
-):
+) -> torch.Tensor:
     """
-    Награда за близость к ИНИТУ на немаскированных DOF.
-    Если есть команда на движение, оси ног (leg_bits) исключаются из расчёта.
+    Награда для mask=1: экспоненциальный трекинг ТАРГЕТА.
+    Позиционная близость считаем вдоль отрезка init→target:
+      s = clamp((q_norm - init_norm)/(target - init), 0..1) — доля пути;
+      d = 1 - s — «остаток до цели» (0 в цели, 1 у инита).
+    Используем MSE по d, а скорость гейтится этой близостью.
     """
-    robot = env.scene["robot"]
-    q = robot.data.joint_pos                      # (N, D)
+    asset = env.scene["robot"]
+    q, qd = asset.data.joint_pos, asset.data.joint_vel
     device, dtype = q.device, q.dtype
 
-    # нормировка поз в [-1, 1]
-    qmin = robot.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
-    qmax = robot.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    # нормализация поз/скоростей в [-1,1]
+    qmin = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
     mid  = 0.5 * (qmin + qmax)
     scl  = 2.0 / (qmax - qmin + 1e-6)
-    qn   = (q - mid) * scl                        # (N, D)
+    qn, qdn = (q - mid) * scl, qd * scl
 
-    # маска
-    msk = env.command_manager.get_term(mask_name).command > 0.5
-    msk = msk.to(device=device)                   # (N, D) bool
-    inv = ~msk                                    # немаскированные DOF
+    # маска и таргет
+    msk = (env.command_manager.get_term(mask_name).command > 0.5).to(device=device)
+    tgt = torch.as_tensor(env.command_manager.get_term("target_joint_pose").command, dtype=dtype, device=device)
 
-    # --- детект "есть команда на движение" ---
-    moving = None
-    try:
-        cmd = env.command_manager.get_term(command_name).command
-        cmd = torch.as_tensor(cmd, dtype=dtype, device=device)   # (N, C)
-        # берём линейную часть из первых двух компонент (если есть) и yaw из 3-й (если есть)
-        lin_mag = torch.zeros(cmd.shape[0], device=device, dtype=dtype)
-        if cmd.shape[1] >= 2:
-            lin_mag = (cmd[:, 0]**2 + cmd[:, 1]**2).sqrt()
-        ang_mag = torch.zeros_like(lin_mag)
-        if cmd.shape[1] >= 3:
-            ang_mag = cmd[:, 2].abs()
-        moving = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)  # (N,)
-    except Exception:
-        # если команды нет — считаем, что движения нет
-        moving = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
-
-    # --- исключаем leg_bits из расчёта, когда есть команда на движение ---
-    if leg_bits is not None and len(leg_bits) > 0:
-        leg_mask_1d = torch.zeros(q.shape[1], dtype=torch.bool, device=device)
-        leg_mask_1d[list(leg_bits)] = True                     # (D,)
-        drop = moving.unsqueeze(1) & leg_mask_1d.unsqueeze(0)  # (N, D)
-        inv = inv & ~drop
-
-    # --- нормированный инит (кэш на нужном девайсе) ---
+    # init (кэшируемый, нормированный)
     init_qn = getattr(env, init_attr, None)
     if init_qn is None:
-        init_q = getattr(robot.data, "default_joint_pos", None)
+        init_q = getattr(asset.data, "default_joint_pos", None)
         if init_q is not None:
-            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)  # (D,)
-            init_qn = (init_q - mid) * scl                                # (D,)
-            if init_qn.dim() == 1:
-                init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)    # (N, D)
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)
+            init_qn = 2.0 * (init_q - mid) / (qmax - qmin + 1e-6)   # (J,)
+            init_qn = init_qn.unsqueeze(0)                           # (1,J)
         else:
-            init_qn = qn.detach().clone()
+            init_qn = qn.detach().clone().mean(dim=0, keepdim=True)  # (1,J)
         setattr(env, init_attr, init_qn)
     else:
         init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
         if init_qn.dim() == 1:
-            init_qn = init_qn.unsqueeze(0).expand(qn.shape[0], -1)
+            init_qn = init_qn.unsqueeze(0)
 
-    # --- MAE по немаскированным (после исключения ног при движении) ---
-    err = (qn - init_qn).abs()
-    inactive_cnt = inv.sum(dim=1)                                # (N,)
-    mae = (err * inv).sum(dim=1) / inactive_cnt.clamp_min(1)
+    # нормализация вдоль сегмента init→target
+    denom = tgt - init_qn                                   # (N,J)
+    valid = denom.abs() > 1e-6                              # где target ≠ init
+    denom_safe = torch.where(valid, denom, torch.ones_like(denom))
+    s = ((qn - init_qn) / denom_safe).clamp(0.0, 1.0)       # (N,J) доля пути
+    d = 1.0 - s                                             # остаток до цели
 
-    # линейная шкала выплат: mae∈[0, tol] → [r_at_zero, r_at_tol], иначе 0
-    slope = (r_at_zero - r_at_tol) / max(tol, 1e-6)
-    r = r_at_zero - slope * mae
-    r = torch.where(mae <= tol, r, torch.zeros_like(r))
+    # считаем только активные и валидные DOF
+    W = (msk & valid).float()
+    cnt = W.sum(dim=1).clamp_min(1.0)
 
-    if zero_if_no_inactive:
-        r = torch.where(inactive_cnt > 0, r, torch.zeros_like(r))
+    # позиция в u-пространстве и скорость
+    pos_mse_u = ((d * d) * W).sum(dim=1) / cnt
+    vel_mse   = ( (qdn * qdn) * W).sum(dim=1) / cnt
 
+    # гейт скорости — важнее у цели (d маленькое)
+    gate_fac = torch.exp(-pos_mse_u / (gate * gate + 1e-12))
+
+    total = (w_pos * pos_mse_u) / (std_pos * std_pos + 1e-12) \
+          + (w_vel * gate_fac * vel_mse) / (std_vel * std_vel + 1e-12)
+
+    r = torch.exp(-total)
+    r = torch.where(cnt > 0, r, torch.zeros_like(r))
     return r
+
+
+def unmasked_init_proximity_reward_exp_vel(
+    env,
+    mask_name: str = "dof_mask",
+    std_pos: float = 0.25,     # радиус в u-пространстве (доля сегмента)
+    std_vel: float = 0.25,
+    w_pos: float = 1.0,
+    w_vel: float = 1.0,
+    gate: float = 0.25,
+    init_attr: str = "JOINT_INIT_POS_NORM",
+    # исключаем ноги при движении (логика прежняя)
+    command_name: str = "base_velocity",
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    leg_bits = (0,1,3,4,7,8,11,12,15,16,19,20),
+) -> torch.Tensor:
+    """
+    Награда для mask=0: экспоненциальный возврат к ИНИТу.
+    Позиционная близость — доля сегмента s (0 в ините, 1 в таргете), используем MSE по s.
+    Скорость гейтится близостью к иниту (малые s → сильнее значимость низкой скорости).
+    Ноги исключаем при наличии команды на движение (как раньше).
+    """
+    asset = env.scene["robot"]
+    q, qd = asset.data.joint_pos, asset.data.joint_vel
+    device, dtype = q.device, q.dtype
+
+    # нормализация поз/скоростей в [-1,1]
+    qmin = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn, qdn = (q - mid) * scl, qd * scl
+
+    # маски
+    msk = (env.command_manager.get_term(mask_name).command > 0.5).to(device=device)
+    inv = ~msk
+
+    # цель и инит
+    tgt = torch.as_tensor(env.command_manager.get_term("target_joint_pose").command, dtype=dtype, device=device)
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        init_q = getattr(asset.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)
+            init_qn = 2.0 * (init_q - mid) / (qmax - qmin + 1e-6)
+            init_qn = init_qn.unsqueeze(0)
+        else:
+            init_qn = qn.detach().clone().mean(dim=0, keepdim=True)
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0)
+
+    # опционально — исключаем суставы ног при команде на движение
+    try:
+        cmd = env.command_manager.get_term(command_name).command
+        cmd = torch.as_tensor(cmd, dtype=dtype, device=device)
+        lin_mag = (cmd[:, :2].pow(2).sum(dim=1)).sqrt() if cmd.shape[1] >= 2 else torch.zeros(q.shape[0], device=device)
+        ang_mag = cmd[:, 2].abs() if cmd.shape[1] >= 3 else torch.zeros_like(lin_mag)
+        moving = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)
+    except Exception:
+        moving = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
+
+    if leg_bits and moving.any():
+        leg_mask_1d = torch.zeros(q.shape[1], dtype=torch.bool, device=device)
+        leg_mask_1d[list(leg_bits)] = True
+        drop = moving.unsqueeze(1) & leg_mask_1d.unsqueeze(0)
+        inv = inv & ~drop
+
+    # нормализация вдоль сегмента init→target
+    denom = tgt - init_qn
+    valid = denom.abs() > 1e-6
+    denom_safe = torch.where(valid, denom, torch.ones_like(denom))
+    s = ((qn - init_qn) / denom_safe).clamp(0.0, 1.0)   # близость к иниту: мала, когда у инита
+    # считаем только НЕмаскированные и валидные DOF
+    W = (inv & valid).float()
+    cnt = W.sum(dim=1).clamp_min(1.0)
+
+    pos_mse_u = ((s * s) * W).sum(dim=1) / cnt
+    vel_mse   = ( (qdn * qdn) * W).sum(dim=1) / cnt
+
+    # гейт скорости — важнее у инита (малые s)
+    gate_fac = torch.exp(-pos_mse_u / (gate * gate + 1e-12))
+
+    total = (w_pos * pos_mse_u) / (std_pos * std_pos + 1e-12) \
+          + (w_vel * gate_fac * vel_mse) / (std_vel * std_vel + 1e-12)
+
+    r = torch.exp(-total)
+    r = torch.where(cnt > 0, r, torch.zeros_like(r))
+    return r
+    
+def masked_near_init_penalty_exp_segment(
+    env,
+    mask_name: str = "dof_mask",
+    std_u: float = 0.25,                  # «радиус» по нормализованной доле u∈[0,1]
+    init_attr: str = "JOINT_INIT_POS_NORM",
+) -> torch.Tensor:
+    """
+    Пенальти для mask=1: чем ближе к ИНИТу вдоль отрезка init→target, тем больше штраф.
+      u = clamp((q_norm - init_norm)/(target - init), 0, 1)
+      p = exp( - mean(u^2) / std_u^2 )   (потом умножается на отрицательный weight)
+    """
+    asset = env.scene["robot"]
+    q = asset.data.joint_pos
+    device, dtype = q.device, q.dtype
+
+    # нормируем в [-1, 1]
+    qmin = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn   = (q - mid) * scl                             # (N,J)
+
+    # маска активных DOF
+    mask = (env.command_manager.get_term(mask_name).command > 0.5).to(device=device)  # (N,J)
+
+    # нормированный init
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        init_q = getattr(asset.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)              # (J,)
+            init_qn = 2.0 * (init_q - mid) / (qmax - qmin + 1e-6)                     # (J,)
+            init_qn = init_qn.unsqueeze(0)                                            # (1,J)
+        else:
+            init_qn = qn.detach().clone().mean(dim=0, keepdim=True)                   # (1,J)
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0)
+
+    # target
+    tgt = env.command_manager.get_term("target_joint_pose").command
+    tgt = torch.as_tensor(tgt, dtype=dtype, device=device)                            # (N,J)
+
+    # нормализация вдоль отрезка init→target
+    denom  = tgt - init_qn                                                            # (N,J)
+    valid  = denom.abs() > 1e-6                                                       # (N,J)
+    denom_safe = torch.where(valid, denom, torch.ones_like(denom))
+    s = (qn - init_qn) / denom_safe                                                   # (N,J)
+    s = s.clamp(0.0, 1.0)
+
+    # считаем только активные и валидные DOF
+    W = (mask & valid).float()
+    cnt = W.sum(dim=1).clamp_min(1.0)
+
+    u2_mean = ( (s * s) * W ).sum(dim=1) / cnt
+    p = torch.exp( - u2_mean / (std_u * std_u + 1e-12) )
+    p = torch.where(cnt > 0, p, torch.zeros_like(p))
+    return p
+
+
+def unmasked_near_target_penalty_exp_segment(
+    env,
+    mask_name: str = "dof_mask",
+    std_u: float = 0.25,
+    # опционально исключать суставы ног при наличии команды на движение (не скорость!)
+    exclude_legs_when_moving: bool = True,
+    command_name: str = "base_velocity",
+    lin_deadband: float = 0.03,
+    ang_deadband: float = 0.03,
+    leg_bits = (0, 1, 3, 4, 7, 8, 11, 12, 15, 16, 19, 20),
+    init_attr: str = "JOINT_INIT_POS_NORM",
+) -> torch.Tensor:
+    """
+    Пенальти для mask=0: чем ближе к ТАРГЕТУ вдоль init→target, тем больше штраф.
+      s = clamp((q_norm - init_norm)/(target - init), 0, 1)
+      d = 1 - s
+      p = exp( - mean(d^2) / std_u^2 )
+    По желанию исключаем DOF ног при наличии команды на движение (чтобы не мешать шагообразованию).
+    """
+    asset = env.scene["robot"]
+    q = asset.data.joint_pos
+    device, dtype = q.device, q.dtype
+
+    # нормируем в [-1, 1]
+    qmin = asset.data.soft_joint_pos_limits[..., 0].to(device=device, dtype=dtype)
+    qmax = asset.data.soft_joint_pos_limits[..., 1].to(device=device, dtype=dtype)
+    mid  = 0.5 * (qmin + qmax)
+    scl  = 2.0 / (qmax - qmin + 1e-6)
+    qn   = (q - mid) * scl                                                             # (N,J)
+
+    # инвертированная маска
+    mask = (env.command_manager.get_term(mask_name).command > 0.5).to(device=device)   # (N,J)
+    inv  = ~mask                                                                        # (N,J) bool
+
+    # нормированный init
+    init_qn = getattr(env, init_attr, None)
+    if init_qn is None:
+        init_q = getattr(asset.data, "default_joint_pos", None)
+        if init_q is not None:
+            init_q = torch.as_tensor(init_q, dtype=dtype, device=device)                # (J,)
+            init_qn = 2.0 * (init_q - mid) / (qmax - qmin + 1e-6)                       # (J,)
+            init_qn = init_qn.unsqueeze(0)                                              # (1,J)
+        else:
+            init_qn = qn.detach().clone().mean(dim=0, keepdim=True)                     # (1,J)
+        setattr(env, init_attr, init_qn)
+    else:
+        init_qn = torch.as_tensor(init_qn, dtype=dtype, device=device)
+        if init_qn.dim() == 1:
+            init_qn = init_qn.unsqueeze(0)
+
+    # target
+    tgt = env.command_manager.get_term("target_joint_pose").command
+    tgt = torch.as_tensor(tgt, dtype=dtype, device=device)                              # (N,J)
+
+    # опционно — исключаем leg_bits, если «есть команда на движение»
+    if exclude_legs_when_moving:
+        try:
+            cmd = env.command_manager.get_term(command_name).command
+            cmd = torch.as_tensor(cmd, dtype=dtype, device=device)                      # (N,C)
+            lin_mag = (cmd[:, :2].pow(2).sum(dim=1)).sqrt() if cmd.shape[1] >= 2 else torch.zeros(q.shape[0], device=device)
+            ang_mag = cmd[:, 2].abs() if cmd.shape[1] >= 3 else torch.zeros_like(lin_mag)
+            moving = (lin_mag > lin_deadband) | (ang_mag > ang_deadband)                # (N,)
+        except Exception:
+            moving = torch.zeros(q.shape[0], dtype=torch.bool, device=device)
+
+        if leg_bits and moving.any():
+            leg_mask_1d = torch.zeros(q.shape[1], dtype=torch.bool, device=device)
+            leg_mask_1d[list(leg_bits)] = True
+            drop = moving.unsqueeze(1) & leg_mask_1d.unsqueeze(0)
+            inv = inv & ~drop
+
+    # нормализация вдоль отрезка init→target
+    denom  = tgt - init_qn                                                              # (N,J)
+    valid  = denom.abs() > 1e-6                                                         # (N,J)
+    denom_safe = torch.where(valid, denom, torch.ones_like(denom))
+    s = (qn - init_qn) / denom_safe                                                     # (N,J)
+    s = s.clamp(0.0, 1.0)
+    d = 1.0 - s                                                                         # близость к таргету
+
+    # считаем только НЕмаскированные, валидные DOF (и не-ноги, если выкинули)
+    W = (inv & valid).float()
+    cnt = W.sum(dim=1).clamp_min(1.0)
+
+    d2_mean = ( (d * d) * W ).sum(dim=1) / cnt
+    p = torch.exp( - d2_mean / (std_u * std_u + 1e-12) )
+    p = torch.where(cnt > 0, p, torch.zeros_like(p))
+    return p

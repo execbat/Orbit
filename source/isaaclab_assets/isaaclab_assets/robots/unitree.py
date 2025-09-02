@@ -408,21 +408,21 @@ MATH_G1_CFG = ArticulationCfg(
         pos=(0.0, 0.0, 0.74),
         joint_pos={
             ".*_hip_pitch_joint": -0.20,
-            ".*_hip_roll_joint": 0, 
-            ".*_hip_yaw_joint": 0,
+            #".*_hip_roll_joint": 0, #!
+            #".*_hip_yaw_joint": 0,  #!
              
             ".*_knee_joint": 0.175, # 0.42, (10 degrees)
             ".*_ankle_pitch_joint": -0.23,
-            ".*_ankle_roll_joint": 0,
+            #".*_ankle_roll_joint": 0,  #!
             
-            "waist_yaw_joint": 0,
+            #"waist_yaw_joint": 0,  #!
             
             ".*_elbow_joint": 1.39, #0.87,              
             "left_shoulder_roll_joint": 0.176,
             "right_shoulder_roll_joint": -0.176,
             ".*_shoulder_pitch_joint": 0.35,
-            ".*_shoulder_yaw_joint": 0,
-            ".*_wrist_roll_joint": 0.87, 
+            #".*_shoulder_yaw_joint": 0,  #!
+            #".*_wrist_roll_joint": 0.87, #!
         },
         joint_vel={".*": 0.0},
     ),
