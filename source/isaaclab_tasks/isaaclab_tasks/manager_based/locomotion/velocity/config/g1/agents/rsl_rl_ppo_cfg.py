@@ -16,23 +16,23 @@ class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "g1_rough"
     empirical_normalization = False
     
-    policy = RslRlPpoActorCriticCfg(
+#    policy = RslRlPpoActorCriticCfg(
+#        init_noise_std=1.0,
+#        actor_hidden_dims=[1024, 1024],
+#        critic_hidden_dims=[1024, 1024],
+#        activation="elu", # "gelu",
+#    )
+    policy = RslRlPpoActorCriticRecurrentCfg(
         init_noise_std=1.0,
         actor_hidden_dims=[256],
         critic_hidden_dims=[256],
-        activation="gelu", # "elu",
-    )
-#    policy = RslRlPpoActorCriticRecurrentCfg(
-#        init_noise_std=1.0,
-#        actor_hidden_dims=[256, 1024, 512],
-#        critic_hidden_dims=[256, 1024, 512],
-#        activation="gelu",
+        activation="elu", #gelu
 
         # — параметры памяти —
-#        rnn_type="lstm",        # "lstm" | "gru"
-#        rnn_hidden_dim=256,     # размер скрытого состояния
-#        rnn_num_layers=1,       # слоев LSTM; начни с 1
-#    )
+        rnn_type="lstm",        # "lstm" | "gru"
+        rnn_hidden_dim=256,     # размер скрытого состояния
+        rnn_num_layers=1,       # слоев LSTM; начни с 1
+    )
 
 
 
