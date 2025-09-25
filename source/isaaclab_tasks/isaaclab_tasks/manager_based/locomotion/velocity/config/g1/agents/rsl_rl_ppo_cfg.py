@@ -16,23 +16,23 @@ class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     experiment_name = "g1_rough"
     empirical_normalization = False
     
-#    policy = RslRlPpoActorCriticCfg(
-#        init_noise_std=1.0,
-#        actor_hidden_dims=[1024, 1024],
-#        critic_hidden_dims=[1024, 1024],
-#        activation="elu", # "gelu",
-#    )
-    policy = RslRlPpoActorCriticRecurrentCfg(
+    policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[256],
-        critic_hidden_dims=[256],
-        activation="elu", #gelu
-
-        # — параметры памяти —
-        rnn_type="lstm",        # "lstm" | "gru"
-        rnn_hidden_dim=256,     # размер скрытого состояния
-        rnn_num_layers=1,       # слоев LSTM; начни с 1
+        actor_hidden_dims=[512, 256, 128],
+        critic_hidden_dims=[512, 256, 128],
+        activation="elu", # "gelu",
     )
+#    policy = RslRlPpoActorCriticRecurrentCfg(
+#        init_noise_std=1.0,
+#        actor_hidden_dims=[256],
+#        critic_hidden_dims=[256],
+#        activation="elu", #gelu
+#
+#        # — параметры памяти —
+#        rnn_type="lstm",        # "lstm" | "gru"
+#        rnn_hidden_dim=256,     # размер скрытого состояния
+#        rnn_num_layers=1,       # слоев LSTM; начни с 1
+#    )
 
 
 
@@ -40,14 +40,14 @@ class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.008,
+        entropy_coef=0.01,
         num_learning_epochs=5,
-        num_mini_batches= 4,
+        num_mini_batches=4,
         learning_rate=1.0e-3,
-        schedule="adaptive",   # "adaptive", # "fixed", # fized because lr changes due to schedule from inside of env. not by KL_div "adaptive",
+        schedule="adaptive",
         gamma=0.99,
         lam=0.95,
-        desired_kl=0.01, # 0.01,
+        desired_kl=0.01,
         max_grad_norm=1.0,
     )
 
@@ -68,7 +68,7 @@ class MathG1FlatPPORunnerCfg(G1RoughPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.max_iterations = 150000
+        self.max_iterations = 15000000
         self.experiment_name = "g1_flat"
         #self.policy.actor_hidden_dims = [ 256, 128]
         #self.policy.critic_hidden_dims = [ 256, 128]

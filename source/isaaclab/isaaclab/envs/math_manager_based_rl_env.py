@@ -82,7 +82,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         0.7333333492279053, 0.7333333492279053, 0.0, 0.0, 0.0, 0.0], 
             dtype=torch.float)
         
-        self.adaptive_state = cfg.adaptive_state
+        #self.adaptive_state = cfg.adaptive_state
         
         # cfg.episode_length_s = 5
         
@@ -484,7 +484,7 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         
         ###########
         # Curriculum update logic
-        mean_tracking_reward = info['Episode_Reward/target_proximity_exp_vel'].mean().item()
+        mean_tracking_reward = info['Episode_Reward/termination_penalty'].mean().item()
         self._update_adaptive_curriculum(mean_tracking_reward)
         
         # проброс нового лернинг рейта наверх
@@ -569,19 +569,19 @@ class MathManagerBasedRLEnv(MathManagerBasedEnv, gym.Env):
         #          f"stage={self.adaptive_state.stage}")
 
         # print(f'Curriculum aramenters updated, mean_tracking_reward: {mean_tracking_reward}')
-        changed = self.adaptive_state.update(self, mean_tracking_reward)  # должен вернуть bool
-        if not changed:
-            return None
+        #changed = self.adaptive_state.update(self, mean_tracking_reward)  # должен вернуть bool
+        #if not changed:
+        #    return None
         
             #new_lr = self.adaptive_state.get_learning_rate()
             #for group in self.optimizer.param_groups:
             #    group['lr'] = new_lr
             #print(f'Learning rate decreased to: {new_lr}')
-        print(f'Curriculum aramenters updated, mean_tracking_reward: {mean_tracking_reward}')
-        self.MIANDER_SCALE   = self.adaptive_state.get_miander_scale()
+        #print(f'Curriculum aramenters updated, mean_tracking_reward: {mean_tracking_reward}')
+        #self.MIANDER_SCALE   = self.adaptive_state.get_miander_scale()
         # self.MAX_PERIOD      = self.adaptive_state.get_max_period()
-        self.MASK_PROB_LEVEL = self.adaptive_state.get_mask_prob()
-        self.EXPONENT_MULTIPLOCATOR = self.adaptive_state.get_exponent_multiplicator()
+        #self.MASK_PROB_LEVEL = self.adaptive_state.get_mask_prob()
+        #self.EXPONENT_MULTIPLOCATOR = self.adaptive_state.get_exponent_multiplicator()
             #print(f"[CURR-UP] step={self.common_step_counter} -> stage={self.adaptive_state.stage} | "
             #      f"scale={self.MIANDER_SCALE:.2f} period={self.MAX_PERIOD:.2f} mask={self.MASK_PROB_LEVEL:.2f}")
         # return self.adaptive_state.get_learning_rate()

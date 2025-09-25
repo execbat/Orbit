@@ -25,6 +25,7 @@ from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import isaaclab_tasks.manager_based.locomotion.velocity.mdp as mdp
 from isaaclab.envs.mdp.curriculums import modify_env_param
+from isaaclab.envs.mdp.math_curriculum_cfg import MathCurriculumCfg
 
 
 ##
@@ -124,7 +125,7 @@ class MathCommandsCfg:
 
     target_joint_pose = mdp.UniformVectorCommandCfg(
         asset_name="robot",
-        resampling_time_range=(10.0, 15.0),
+        resampling_time_range=(40.0, 40.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
@@ -137,13 +138,14 @@ class MathCommandsCfg:
     
     dof_mask = mdp.BernoulliMaskCommandCfg(
         asset_name="robot",
-        resampling_time_range=(10.0, 15.0),
+        resampling_time_range=(40.0, 40.0),
         rel_standing_envs=0.02,
         rel_heading_envs=1.0,
         heading_command=True,
         heading_control_stiffness=0.5,
         debug_vis=True,
         dim = 23,
+        p_one = 0.0,
         ranges=((-1.0, 1.0),) * 23,
         
     )        
@@ -448,12 +450,12 @@ class RewardsCfg:
     ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.03)
     dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-5)
     dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
+    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.15)
     feet_air_time = RewTerm(
         func=mdp.feet_air_time,
-        weight=0.125,
+        weight=0.0,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*FOOT"),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_ankle_roll_link","right_ankle_roll_link"]),
             "command_name": "base_velocity",
             "threshold": 0.5,
         },
@@ -461,7 +463,7 @@ class RewardsCfg:
     undesired_contacts = RewTerm(
         func=mdp.undesired_contacts,
         weight=-1.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH1"), "threshold": 1.0},
+        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH1"), "threshold": 10.0},
     )
     # -- optional penalties
     flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=0.0)
@@ -470,7 +472,65 @@ class RewardsCfg:
 @configclass
 class MathRewardsCfg:
     """Reward terms for the MDP."""
-
+    
+    upright = RewTerm(
+        func=mdp.trunk_upright_alignment,
+        weight=0.8,
+        params={"body_up_axis": "z", "power": 1.0, "DEBUG" : False},
+    )
+    track_lin_vel_xy_exp = RewTerm(
+        func=mdp.track_lin_vel_xy_exp, weight=0.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+    )
+    track_ang_vel_z_exp = RewTerm(
+        func=mdp.track_ang_vel_z_exp, weight=0.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
+    )
+    feet_air_time = RewTerm(
+        func=mdp.feet_air_time,
+        weight=0.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_ankle_roll_link","right_ankle_roll_link"]),
+            "command_name": "base_velocity",
+            "threshold": 0.5,
+        },
+    )    
+    swing_clearance = RewTerm(
+        func=mdp.swing_foot_clearance_reward,
+        weight=0.0,   # 1.0–2.0
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_ankle_roll_link","right_ankle_roll_link"]),
+            "asset_cfg":  SceneEntityCfg("robot"),
+            "command_name": "base_velocity",
+            "contact_force_threshold": 5.0,
+            "h_des": 0.06,
+            "beta": 120.0,
+        },
+    )
+    action_rate_l2 =      RewTerm(func=mdp.action_rate_l2,   weight=-0.0)
+    dof_torques_l2 =      RewTerm(func=mdp.joint_torques_l2, weight=0.0)
+    joint_vel_l2 =        RewTerm(func=mdp.joint_vel_l2,     weight= 0.0)
+    dof_acc_l2 =          RewTerm(func=mdp.joint_acc_l2,     weight=0.0)
+    feet_slide = RewTerm(
+        func=mdp.feet_slide,
+        weight=0.0, 
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+        },
+    )   
+    feet_impact_vel = RewTerm(
+        func=mdp.feet_impact_vel,
+        weight=0.0,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+            "asset_cfg":  SceneEntityCfg("robot",          body_names=".*_ankle_roll_link"),
+            "clip": 0.6,
+            "contact_force_threshold": 5.0,
+            "use_history": True,
+        # "store_key": "_feet_prev_contact__foot"
+        }
+    )
+    
+    
     # -- task
     # reward for following target axis values with axis_mask == 1 # AnumalMath
     # miander_tracking_reward = RewTerm(func=mdp.miander_tracking_reward, weight=4.0) # 4
@@ -503,11 +563,11 @@ class MathRewardsCfg:
 #    )
     
     # 1) прогресс к цели по маскированным суставам
-    #masked_progress = RewTerm(
-    #    func=mdp.masked_progress_reward,
-    #    weight=5.0,                      #  2.0–4.0
-    #    params={}                        # опционально: {"eps": 0.02}
-    #)
+#    masked_progress = RewTerm(
+#        func=mdp.masked_progress_reward,
+#        weight=2.0,                      #  2.0–4.0
+#        params={"eps": 0.002, "neg_scale": 0.2, "mask_name": "dof_mask"},
+#    )
 #    masked_progress_potential = RewTerm(
 #        func=mdp.masked_progress_reward,
 #        weight=3.0,
@@ -531,46 +591,43 @@ class MathRewardsCfg:
     
     
     
-    track_lin_vel_xy_exp = RewTerm(
-        func=mdp.track_lin_vel_xy_exp, weight=4.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
-    )
-    track_ang_vel_z_exp = RewTerm(
-        func=mdp.track_ang_vel_z_exp, weight=2.0, params={"command_name": "base_velocity", "std": math.sqrt(0.25)}
-    )
+
         
     pelvis_height_target_reward = RewTerm(
-        func=mdp.pelvis_height_target_reward, weight=2.0)
+        func=mdp.pelvis_height_target_reward, weight=0.3)
         
         
     # -- penalties
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
-    lin_vel_z_l2 = RewTerm(func=mdp.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=mdp.ang_vel_xy_l2, weight=-0.05)
-    dof_torques_l2 = RewTerm(func=mdp.joint_torques_l2, weight=-1.0e-6)
-    dof_acc_l2 = RewTerm(func=mdp.joint_acc_l2, weight=-1.0e-7)
-    action_rate_l2 = RewTerm(func=mdp.action_rate_l2, weight=-0.02)
+#    track_lin_vel_xy_mse = RewTerm(
+#        func=mdp.track_lin_vel_xy_mse, weight=-2.0, params={"command_name": "base_velocity"}
+#    )
+#    track_ang_vel_z_mse = RewTerm(
+#        func=mdp.track_ang_vel_z_mse, weight=-0.5, params={"command_name": "base_velocity"}
+#    )
+    
+    
+    termination_penalty = RewTerm(func=mdp.is_terminated,    weight=-200.0) #!!!!
+    lin_vel_z_l2 =        RewTerm(func=mdp.lin_vel_z_l2,     weight=0.0)
+    ang_vel_xy_l2 =       RewTerm(func=mdp.ang_vel_xy_l2,    weight=0.0)
+    
+    
+    
+    
     
     undesired_contacts = RewTerm(
-        func=mdp.undesired_contacts,
-        weight=-0.5,
+        func=mdp.undesired_contacts,	
+        weight=-5.0,
         #params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*THIGH"), "threshold": 1.0},
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=[ "torso_link", "pelvis", ".*_hip_.*", ".*_wrist_.*", ".*shoulder_.*", ".*knee_.*", ".*elbow_.*"]),
-        "threshold": 2.0}
+        "threshold": 8.0}
     )
     
-#    feet_slide = RewTerm(
-#        func=mdp.feet_slide,
-#        weight=-1.5, # NEGATIVE ONLY
-#        params={
-#            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
-#            "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
-#        },
-#    )   
+
 
     
     feet_sep_align = RewTerm(
         func=mdp.feet_separation_and_alignment_penalty,
-        weight=-2.0,   # штраф → отрицательный вес
+        weight=0.0,   # штраф → отрицательный вес
         params={
             # ВАЖНО: порядок тел — [левая, правая]
             "sensor_cfg": SceneEntityCfg(
@@ -602,7 +659,7 @@ class MathRewardsCfg:
             "w_cross": 0.7,
             "beta_cross": 6.0,
 
-            "w_sep": 1.0,
+            "w_sep": 2.0, # penalty weight for big dist btw legs
             "shoulder_width": 0.2,
             "beta_sep": 2.0,
         },
@@ -610,7 +667,7 @@ class MathRewardsCfg:
 
     no_cmd_motion = RewTerm(
         func=mdp.no_command_motion_penalty,
-        weight=-2.0,   
+        weight=0.0,   
         params={
             "command_name": "base_velocity",
             "lin_deadband": 0.03,   # чувствительность к «нулевой» линейной команде (м/с)
@@ -623,8 +680,8 @@ class MathRewardsCfg:
 
     
     # -- optional penalties
-    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0) # MAKE WEIGHT MORE THAN 0 ELSE INGORED!
-    # dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.05)
+#    flat_orientation_l2 = RewTerm(func=mdp.flat_orientation_l2, weight=-2.0) # MAKE WEIGHT MORE THAN 0 ELSE INGORED!
+    dof_pos_limits = RewTerm(func=mdp.joint_pos_limits, weight=-0.00)
     
 
     
@@ -648,42 +705,42 @@ class MathRewardsCfg:
 #    )
 
     # 4) штраф за боковой слип относительно направления команды
-#    lateral_slip = RewTerm(
-#        func=mdp.lateral_slip_penalty,
-#        weight=-1.0,
-#        params={"command_name": "base_velocity"}
-#    )
+    lateral_slip = RewTerm(
+        func=mdp.lateral_slip_penalty,
+        weight=0.0,
+        params={"command_name": "base_velocity"}
+    )
     
-#    com_over_support = RewTerm(
-#        func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
-#        weight=3.0,
-#        params={
-#            "sensor_cfg": SceneEntityCfg(
-#                "contact_forces",
-#                # выбери один вариант:
-#                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # точные имена
-#                # или — если хочешь по маске:
-#                # body_names=".*_ankle_roll_link",
-#            ),
-#            "asset_cfg": SceneEntityCfg("robot"),
-#            "contact_force_threshold": 5.0,
-#            # вместо старого `sigma` теперь используем eps_half
-#            # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
-#            "sigma"   : 0.06,
-#            "weighted": True,
-#            
-#            # new:
-#            "require_both_when_idle": True,
-#            "mask_name": "dof_mask",
-#            "lin_deadband": 0.03,
-#            "ang_deadband": 0.03,
-#            "leg_bits": (0,1,3,4,7,8,11,12,15,16,19,20),
-#        },
-#    )
+    com_over_support = RewTerm(
+        func=mdp.com_over_support_reward_fast,   # твоя экспо-версия
+        weight=3.0,
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                # выбери один вариант:
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],  # точные имена
+                # или — если хочешь по маске:
+                # body_names=".*_ankle_roll_link",
+            ),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "contact_force_threshold": 8.0,
+            # вместо старого `sigma` теперь используем eps_half
+            # если раньше стояло sigma=0.06 → eps_half ≈ 1.177*0.06 = 0.0706
+            "sigma"   : 0.06,
+            "weighted": True,
+            
+            # new:
+            "require_both_when_idle": True,
+            "mask_name": "dof_mask",
+            "lin_deadband": 0.03,
+            "ang_deadband": 0.03,
+            "leg_bits": (0,1,3,4,7,8,11,12,15,16,19,20),
+        },
+    )
     
     limit_saturation = RewTerm(
         func=mdp.joint_limit_saturation_penalty,
-        weight=-10.0,   
+        weight=0.0,   
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "margin": 0.05,      # можно 0.08–0.15
@@ -695,7 +752,7 @@ class MathRewardsCfg:
     
     single_foot_stationary = RewTerm(
         func=mdp.single_foot_stationary_penalty,
-        weight=-1.0,   
+        weight=0.0,   
         params={
             # сенсор и ссылки на стопы
             "sensor_cfg": SceneEntityCfg(
@@ -713,7 +770,7 @@ class MathRewardsCfg:
             "command_name": "base_velocity",  # как в track_* термах
 
             # маска с ЮДП (оси ног)
-            "use_mask": True,
+            "use_mask": True, #True, !!!!!!!!!!!!!!!!!!!!
             "mask_name": "dof_mask",
             # индексы осей ног в порядке сверху-вниз из твоей таблицы:
             # 0: L hip pitch, 1: R hip pitch, 3: L hip roll, 4: R hip roll,
@@ -727,33 +784,33 @@ class MathRewardsCfg:
         },
     )
     
-    leg_symmetry_idle = RewTerm(
-        func=mdp.leg_symmetry_idle_reward_norm,
-        weight=1.0,   # диапазон 2.0–5.0
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "base_velocity",
-            "dof_mask_name": "dof_mask",
-            "obs_key_norm": "dof_pos_norm",  # ключ в obs с норм-позами [-1..1]; если нет — посчитаем сами
-
-            # «почти нулевые» команды
-            "lin_deadband": 0.03,
-            "ang_deadband": 0.03,
-
-            # индексы ног из твоего списка (сверху-вниз)
-            "left_dofs":  [0, 3, 7, 11, 15, 19],   # L hip pitch/roll/yaw, knee, ankle pitch/roll
-            "right_dofs": [1, 4, 8, 12, 16, 20],
-
-            # веса и «резкость» колпаков
-            "w_sym": 0.6, "w_init": 0.4,
-            "beta_sym": 6.0, "beta_init": 4.0,
-            "eps": 1e-6,
-        },
-    )
+#    leg_symmetry_idle = RewTerm(
+#        func=mdp.leg_symmetry_idle_reward_norm,
+#        weight=0.1,   # диапазон 2.0–5.0
+#        params={
+#            "asset_cfg": SceneEntityCfg("robot"),
+#            "command_name": "base_velocity",
+#            "dof_mask_name": "dof_mask",
+#            "obs_key_norm": "dof_pos_norm",  # ключ в obs с норм-позами [-1..1]; если нет — посчитаем сами#
+#
+#            # «почти нулевые» команды
+#            "lin_deadband": 0.03,
+#            "ang_deadband": 0.03,
+#
+#            # индексы ног из твоего списка (сверху-вниз)
+#            "left_dofs":  [0, 3, 7, 11, 15, 19],   # L hip pitch/roll/yaw, knee, ankle pitch/roll
+#            "right_dofs": [1, 4, 8, 12, 16, 20],
+#
+#            # веса и «резкость» колпаков
+#            "w_sym": 0.6, "w_init": 0.4,
+#            "beta_sym": 6.0, "beta_init": 4.0,
+#            "eps": 1e-6,
+#        },
+#    )
     
     alternating_steps_reward = RewTerm(
         func=mdp.alternating_step_reward,
-        weight=1.0,   # 2.0–4.0
+        weight=0.0,   # 2.0–4.0
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -762,7 +819,7 @@ class MathRewardsCfg:
             "asset_cfg":  SceneEntityCfg("robot"),
             "command_name": "base_velocity",
             "lin_cmd_threshold": 0.05,
-            "use_mask": True,
+            "use_mask": True, #True, !!!!!!!!!!!!!!!!!
             "mask_name": "dof_mask",
             "leg_bits": [0,1,3,4,7,8,11,12,15,16,19,20],
             "contact_force_threshold": 5.0,
@@ -772,47 +829,35 @@ class MathRewardsCfg:
         },
     )    
     
-#    same_lead_penalty = RewTerm(
-#        func=mdp.alternating_same_lead_penalty,
-#        weight=-1.0,   # стартово -1.5…-3.0
-#        params={
-#            "sensor_cfg": SceneEntityCfg(
-#                "contact_forces",
-#                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
-#            ),
-#            "asset_cfg":  SceneEntityCfg("robot"),
-#            "command_name": "base_velocity",
-#
-#            "lin_cmd_threshold": 0.05,
-#            "use_mask": True,
-#            "mask_name": "dof_mask",
-#            "leg_bits": [0,1,3,4,7,8,11,12,15,16,19,20],
+    same_lead_penalty = RewTerm(
+        func=mdp.alternating_same_lead_penalty,
+        weight=0.0,   # стартово -1.5…-3.0
+        params={
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces",
+                body_names=["left_ankle_roll_link", "right_ankle_roll_link"],
+            ),
+            "asset_cfg":  SceneEntityCfg("robot"),
+            "command_name": "base_velocity",
 
-#            "contact_force_threshold": 5.0,
-#            "step_gain": 0.40,
-#            "beta_stride": 3.0,
-#        },
-#    )   
+            "lin_cmd_threshold": 0.05,
+            "use_mask": True,
+            "mask_name": "dof_mask",
+            "leg_bits": [0,1,3,4,7,8,11,12,15,16,19,20],
+            "contact_force_threshold": 5.0,
+            "step_gain": 0.40,
+            "beta_stride": 3.0,
+        },
+    )   
     
     
     heading_align = RewTerm(
         func=mdp.heading_alignment_reward,
-        weight=1.0,
+        weight=0.1,
         params={"command_name": "base_velocity", "lin_cmd_threshold": 0.05, "beta": 4.0},
     )       
     
-#    swing_clearance = RewTerm(
-#        func=mdp.swing_foot_clearance_reward,
-#        weight=1.5,   # 1.0–2.0
-#        params={
-#            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["left_ankle_roll_link","right_ankle_roll_link"]),
-#            "asset_cfg":  SceneEntityCfg("robot"),
-#            "command_name": "base_velocity",
-#            "contact_force_threshold": 5.0,
-#            "h_des": 0.06,
-#            "beta": 120.0,
-#        },
-#    )
+
     
 #    masked_action_rate = RewTerm(func=mdp.masked_action_rate_l2, weight=-0.05, params={"mask_name": "dof_mask"})
     
@@ -820,8 +865,8 @@ class MathRewardsCfg:
 #        func=mdp.masked_success_stable_bonus,
 #        weight=100.0,
 #        params={
-#            "eps": 0.03,      # начни мягко (0.06–0.10), потом ужесточай куррикулумом до 0.02–0.03
-#            "vel_eps": 0.03,
+#            "eps": 0.08,      # начни мягко (0.06–0.10), потом ужесточай куррикулумом до 0.02–0.03
+#            "vel_eps": 0.08,
 #            "bonus": 1.0,
 #            "mask_name": "dof_mask",
 #            
@@ -830,7 +875,7 @@ class MathRewardsCfg:
 
     coalignment_chain = RewTerm(
         func=mdp.leg_pelvis_torso_coalignment_reward,
-        weight=2.0,  # 1.5–3.0
+        weight=0.0,  # 2
         params={
             "asset_cfg": SceneEntityCfg("robot"),
 
@@ -843,7 +888,7 @@ class MathRewardsCfg:
             "right_shank_body": "right_knee_link",
 
             # у этих линков «вперёд» обычно локальный +X
-            "forward_local": (1.0, 0.0, 0.0),
+            "forward_local": (1.0, 0.0, 0.0),#
 
             # внутренние веса
             "w_yaw": 1.0,     # сонаправленность c тазом
@@ -855,7 +900,7 @@ class MathRewardsCfg:
     
     idle_double_support = RewTerm(
         func=mdp.idle_double_support_bonus,
-        weight=1.0,   # начни с 6–10
+        weight=0.0,   # 1
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -870,12 +915,12 @@ class MathRewardsCfg:
         },
     )
     
-#    body_lin_acc_l2 = RewTerm(func=mdp.body_lin_acc_l2, weight=-2.5e-7) # НОВОЕ (при дрожи/подпрыг.) 
+    body_lin_acc_l2 = RewTerm(func=mdp.body_lin_acc_l2, weight=0.0) # НОВОЕ (при дрожи/подпрыг.) 
 
     # --- (опционально) анти-залипание в одноопоре ---
     prolonged_single_support = RewTerm(
         func=mdp.prolonged_single_support_penalty,
-        weight=-1.0,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces",
@@ -885,44 +930,14 @@ class MathRewardsCfg:
             "contact_force_threshold": 3.0,
             "lin_deadband": 0.03,
             "ang_deadband": 0.03,
-            "use_mask": True,
+            "use_mask": True, #True, !!!!!!!!!!!!!!!!!!!!!!!!
             "mask_name": "dof_mask",
             "left_dofs":  (0, 3, 7, 11, 15, 19),
             "right_dofs": (1, 4, 8, 12, 16, 20),
         },
     )
 
-    # mask=1 → к таргету
-    target_proximity_exp_vel = RewTerm(
-        func=mdp.masked_target_proximity_reward_exp_vel,
-        weight=50.0,
-        params=dict(
-            mask_name="dof_mask",
-            std_pos=1.5, #0.7,  
-            std_vel=0.8,
-            w_pos=1.0,  w_vel=0.4,
-            gate=0.7,     # скорость «включается» ближе к цели
-            init_attr="JOINT_INIT_POS_NORM",
-        ),
-    )
 
-    # mask=0 → к иниту (ноги выкидываем при движении)
-    unmasked_init_proximity_exp_vel = RewTerm(
-        func=mdp.unmasked_init_proximity_reward_exp_vel,
-        weight=10.0,
-        params=dict(
-            mask_name="dof_mask",
-            exclude_legs_when_moving = True, # was True
-            std_pos=1.5, #0.7, 
-            std_vel=0.8,
-            w_pos=1.0,  w_vel=0.4,
-            gate=0.7,
-            command_name="base_velocity",
-            lin_deadband=0.03, ang_deadband=0.03,
-            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
-            init_attr="JOINT_INIT_POS_NORM",
-        ),
-    )
 
 #    masked_far_from_target_penalty = RewTerm(
 #        func=mdp.masked_near_target_penalty_linear,
@@ -942,6 +957,291 @@ class MathRewardsCfg:
 #            init_attr="JOINT_INIT_POS_NORM",
 #        ),
 #    )
+# === REWARDS: EXP(-MSE) по скоростям суставов ===
+    # mask=1 → to target pose with zero-velocity bonus near target
+#    target_proximity_exp_pos_and_zero_vel = RewTerm(
+#        func=mdp.masked_target_proximity_reward_exp_pos_and_zero_vel,
+#        weight=20.0,  # базовый вес; при необходимости подстройте 30–80
+#        params=dict(
+#            mask_name="dof_mask",     # какие DOF гоним к таргету (bool mask)
+#            std_pos=0.25,             # “ширина” допусков по позиции (в норме [-1..1]); 0.25–0.5
+#            std_vel=0.5, #!            # “ширина” допусков по скорости; 0.2–0.3
+#            w_pos=1.0,                # вес позиции внутри экспоненты
+#            w_vel=1.5,                # вес нулевой скорости внутри экспоненты (0.5–1.5)
+#            gate=0.25,                # зона (в норме позы), где включается проверка на ~нулевую скорость
+#            init_attr="JOINT_INIT_POS_NORM",  # где хранится нормированная init-поза (если нужно)
+#        ),
+#    )
+
+    # mask=0 → to init pose with zero-velocity bonus; legs optionally excluded while moving
+#    unmasked_init_proximity_exp_pos_and_zero_vel = RewTerm(
+#        func=mdp.unmasked_init_proximity_reward_exp_pos_and_zero_vel,
+#        weight=4.0,   # как в вашем примере; диапазон 5–20
+#        params=dict(
+#            mask_name="dof_mask",           # оцениваем инверт-маску (mask==0)
+#            exclude_legs_when_moving=True,  # исключать ноги, когда есть команда на движение
+#            std_pos=0.30,
+#            std_vel=0.5, # !
+#            w_pos=1.0,
+#            w_vel=1.2,
+#            gate=0.25,
+#            command_name="base_velocity",   # терм с командой [vx, vy, wz] или [vx, wz]
+#            lin_deadband=0.03,              # пороги, когда считаем «движется»
+#            ang_deadband=0.03,
+#            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],  # какие индексы DOF считать «ногами»
+#            init_attr="JOINT_INIT_POS_NORM",
+#        ),
+#    )
+
+
+
+#    # === PENALTIES: MSE по скоростям суставов ===
+#    # mask==1 → к target: штраф за отклонение |v| от эталонного профиля v_des(dist)
+#    target_speed_mse_penalty = RewTerm(
+#        func=mdp.masked_target_speed_mse_penalty,
+#        weight=-20.0,                    
+#        params=dict(
+#            mask_name="dof_mask",
+#            d_ref_norm=1.0,
+#            vmax_norm=1.0,
+#            deadband_norm=0.02,        
+#            vel_fallback=1.0,        
+#        ),
+#    )
+
+#    # mask==0 → к INIT (с исключением ног при движении): штраф за отклонение |v| от v_des(dist_to_init)
+#    unmasked_init_speed_mse_penalty = RewTerm(
+#        func=mdp.unmasked_init_speed_mse_penalty,
+#        weight=-2.0,                   
+#        params=dict(
+#            mask_name="dof_mask",
+#            exclude_legs_when_moving=True,
+#            command_name="base_velocity",
+#            lin_deadband=0.03,
+#            ang_deadband=0.03,
+#            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+#            init_attr="JOINT_INIT_POS_NORM",
+#            d_ref_norm=1.0,
+#            vmax_norm=1.0,
+#            deadband_norm=0.02,
+#            vel_fallback=1.0,
+#        ),
+#    )
+
+
+#    # === DWELL: бонус за удержание и штраф за выход из окна ===
+#    dwell_bonus = RewTerm(
+#        func=mdp.masked_dwell_bonus,
+#        weight=100.0,   # даёт до ~4*max_bonus; 
+#        params=dict(
+#            mask_name="dof_mask",
+#            eps=0.02, vel_eps=0.015,
+#            hold_steps=1,
+#            bonus=0.1, growth=0.1, max_bonus=1.0,
+#        ),
+#    )
+
+#    # === DWELL (UNMASKED): удержание около INIT для DOF из инверт-маски (mask==0) ===
+#    dwell_unmasked = RewTerm(
+#        func=mdp.unmasked_dwell_bonus,
+#        weight=10.0,    # подстрой по месту; обычно 500..1500
+#        params=dict(
+#            mask_name="dof_mask",
+#            # окно допуска (в норме [-1,1] поз и скоростей):
+#            eps=0.04,
+#            vel_eps=0.03,
+#            # сколько подряд шагов «ОК» нужно для старта бонуса:
+#            hold_steps=3,
+#            # форма бонуса (как у masked-варианта):
+#            bonus=0.5, growth=0.1, max_bonus=3.0,
+#            # вокруг какой позы держимся (INIT) и как обращаться с «ногами» при движении:
+#            init_attr="JOINT_INIT_POS_NORM",
+#            exclude_legs_when_moving=True,
+#            command_name="base_velocity",
+#            lin_deadband=0.03,
+#            ang_deadband=0.03,
+#            leg_bits=(0,1,3,4,7,8,11,12,15,16,19,20),
+#        ),
+#    )
+
+#    leaving_ok = RewTerm(
+#        func=mdp.leaving_target_penalty,
+#        weight=-2.0,   # ощутимо больно «сваливать» из окна
+#        params=dict(
+#            mask_name="dof_mask",
+#            eps=0.05, vel_eps=0.04,
+#            cooldown=1,   # штрафуем, если 1 шаг подряд вне окна после успеха
+#        ),
+#    )
+
+#    # === СГЛАДИТЬ У ЦЕЛИ (но не мешать подходу) ===
+#    near_target_smooth = RewTerm(
+#        func=mdp.masked_action_rate_near_target,
+#        weight=-0.6,   # сильнее глобального action_rate_l2,
+#        params=dict(mask_name="dof_mask", gate=0.22),
+#    )
+
+    # mask=1 → к TARGET, без учёта знака (|v| ~ v_des)
+#    target_proximity_exp_vel_abs = RewTerm(
+#        func=mdp.masked_target_proximity_reward_exp_vel_abs,
+#        weight=20.0,  # можно потом подстроить (обычно 12–24)
+#        params=dict(
+#            mask_name="dof_mask",
+#            std_pos=0.25,     # не влияет, можно оставить
+#            std_vel=0.5,
+#            w_pos=1.0,        # не влияет
+#            w_vel=1.5,
+#            gate=0.25,        # не влияет
+#            init_attr="JOINT_INIT_POS_NORM",
+#            d_ref_norm=1.0,
+#            vmax_norm=1.0,
+#            deadband_norm=0.01,
+#            vel_fallback=1.0,
+#        ),
+#    )
+
+    # mask=0 → к INIT, без учёта знака (|v| ~ v_des), ноги можно исключать при движении
+#    unmasked_init_proximity_exp_vel_abs = RewTerm(
+#        func=mdp.unmasked_init_proximity_reward_exp_vel_abs,
+#        weight=4.0,
+#        params=dict(
+#            mask_name="dof_mask",
+#            exclude_legs_when_moving=True,
+#            std_pos=0.30,     # не влияет
+#            std_vel=0.5,
+#            w_pos=1.0,        # не влияет
+#            w_vel=1.2,
+#            gate=0.25,        # не влияет
+#            command_name="base_velocity",
+#            lin_deadband=0.03,
+#            ang_deadband=0.03,
+#            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+#            init_attr="JOINT_INIT_POS_NORM",
+#            d_ref_norm=1.0,
+#            vmax_norm=1.0,
+#            deadband_norm=0.01,
+#            vel_fallback=1.0,
+#        ),
+#    )
+
+    # mask=1 → к таргету
+#    target_proximity_exp_vel = RewTerm(
+#        func=mdp.masked_target_proximity_reward_exp_vel,
+#        weight= 50, #50.0,
+#        params=dict(
+#            mask_name="dof_mask",
+#            std_pos=0.5, #0.7,  
+#            std_vel=0.8, # not used
+#            w_pos=1.0,  
+#            w_vel=0.4,   # not used
+#            gate=0.7,    # not used
+#            init_attr="JOINT_INIT_POS_NORM",
+#        ),
+#    )
+
+    # mask=0 → к иниту (ноги выкидываем при движении)
+#    unmasked_init_proximity_exp_vel = RewTerm(
+#        func=mdp.unmasked_init_proximity_reward_exp_vel,
+#        weight=10, #10.0,
+#        params=dict(
+#            mask_name="dof_mask",
+#            exclude_legs_when_moving = True, # was True
+#            std_pos=0.5, #0.7, 
+#            std_vel=0.8, # not used
+#            w_pos=1.0,  
+#            w_vel=0.4,   # not used
+#            gate=0.7,    # not used
+#            command_name="base_velocity",
+#            lin_deadband=0.03, ang_deadband=0.03,
+#            leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+#            init_attr="JOINT_INIT_POS_NORM",
+#        ),
+#    )
+
+
+    # ===== mask=1: TARGET =====
+    target_proximity_exp_product = RewTerm(
+        func=mdp.masked_target_proximity_reward_product,
+        # продукт двух экспонент ∈[0..1], обычно меньше по масштабу → начни с 50–80
+        weight=120.0,
+        params=dict(
+            pos=dict(  # было: target_proximity_exp_vel
+                mask_name="dof_mask",
+                std_pos=0.5,
+                std_vel=0.8,  # не используется
+                w_pos=1.0,
+                w_vel=0.4,    # не используется
+                gate=0.7,     # не используется
+                init_attr="JOINT_INIT_POS_NORM",
+            ),
+            vel_abs=dict(  # было: target_proximity_exp_vel_abs
+                mask_name="dof_mask",
+                std_pos=0.25,  # не влияет, можно оставить
+                std_vel=0.5,
+                w_pos=1.0,     # не влияет
+                w_vel=1.5,
+                gate=0.25,     # не влияет
+                init_attr="JOINT_INIT_POS_NORM",
+                d_ref_norm=1.0,
+                vmax_norm=0.5,  # half of the maximum speed on the maximal distance error
+                deadband_norm=0.01,
+                vel_fallback=1.0,
+            ),
+        ),
+    )
+
+    # ===== mask=0: INIT =====
+    unmasked_init_proximity_exp_product = RewTerm(
+        func=mdp.unmasked_init_proximity_reward_product,
+        weight=5.0,  # продукт → немного подняли относительно 4 и 10
+        params=dict(
+            pos=dict(  # было: unmasked_init_proximity_exp_vel
+                mask_name="dof_mask",
+                exclude_legs_when_moving=True,
+                std_pos=0.5,
+                std_vel=0.8,  # не используется
+                w_pos=1.0,
+                w_vel=0.4,    # не используется
+                gate=0.7,     # не используется
+                command_name="base_velocity",
+                lin_deadband=0.03,
+                ang_deadband=0.03,
+                leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+                init_attr="JOINT_INIT_POS_NORM",
+            ),
+            vel_abs=dict(  # было: unmasked_init_proximity_exp_vel_abs
+                mask_name="dof_mask",
+                exclude_legs_when_moving=True,
+                std_pos=0.30,   # не влияет
+                std_vel=0.5,
+                w_pos=1.0,      # не влияет
+                w_vel=1.2,
+                gate=0.25,      # не влияет
+                command_name="base_velocity",
+                lin_deadband=0.03,
+                ang_deadband=0.03,
+                leg_bits=[0,1,3,4,7,8,11,12,15,16,19,20],
+                init_attr="JOINT_INIT_POS_NORM",
+                d_ref_norm=1.0,
+                vmax_norm=0.5,   # half of the maximum speed on the maximal distance error
+                deadband_norm=0.01,
+                vel_fallback=1.0,
+            ),
+        ),
+    )
+
+#    track_vel_exp_product = RewTerm(
+#        func=mdp.track_lin_ang_vel_exp_product,
+#        weight=5.0,  
+#        params=dict(
+#            command_name="base_velocity",
+#            std=math.sqrt(0.25),
+#        ),
+#    )
+
+
+
+
 
 @configclass
 class MathTeleopRewardsCfg:
@@ -979,20 +1279,20 @@ class CurriculumCfg:
 
     terrain_levels = CurrTerm(func=mdp.terrain_levels_vel)
     
-@configclass
-class MathCurriculumCfg:
-    miander_scale = CurrTerm(
-        func=modify_env_param,
-        params={"address": "MIANDER_SCALE", "modify_fn": mdp.modify_miander_scale},
-    )
-    max_period = CurrTerm(
-        func=modify_env_param,
-        params={"address": "MAX_PERIOD", "modify_fn": mdp.modify_max_period},
-    )
-    mask_prob = CurrTerm(
-        func=modify_env_param,
-        params={"address": "MASK_PROB_LEVEL", "modify_fn": mdp.modify_mask_prob},
-    )
+#@configclass
+#class MathCurriculumCfg:
+#    miander_scale = CurrTerm(
+#        func=modify_env_param,
+#        params={"address": "MIANDER_SCALE", "modify_fn": mdp.modify_miander_scale},
+#    )
+#    max_period = CurrTerm(
+#        func=modify_env_param,
+#        params={"address": "MAX_PERIOD", "modify_fn": mdp.modify_max_period},
+#    )
+#    mask_prob = CurrTerm(
+#        func=modify_env_param,
+#        params={"address": "MASK_PROB_LEVEL", "modify_fn": mdp.modify_mask_prob},
+#    )
     
 @configclass    
 class MathAdaptiveCurriculumCfg:
@@ -1066,7 +1366,7 @@ class MathAdaptiveCurriculum:
 
     def get_mask_prob(self) -> float:
         # пример зависимости от стадии; подстрой при желании
-        return   0.2 # min(0.5, 0.05 + self.stage / 5000.0)
+        return   0.15 # min(0.5, 0.05 + self.stage / 5000.0)
 
     def get_max_period(self) -> float:
         return 10.0
@@ -1179,10 +1479,9 @@ class MathLocomotionVelocityRoughEnvCfg(MathManagerBasedRLEnvCfg):
     rewards: RewardsCfg = MathRewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    # curriculum: CurriculumCfg = MathCurriculumCfg()
-    curriculum: CurriculumCfg = MathAdaptiveCurriculumCfg()
+    curriculum: CurriculumCfg = MathCurriculumCfg() #MathAdaptiveCurriculumCfg()
     # added
-    adaptive_state: MathAdaptiveCurriculum = MathAdaptiveCurriculum()    
+    #adaptive_state: MathAdaptiveCurriculum = MathAdaptiveCurriculum()    
 
     def __post_init__(self):
         """Post initialization."""
@@ -1224,8 +1523,8 @@ class MathTeleopLocomotionVelocityRoughEnvCfg(MathTeleopManagerBasedRLEnvCfg):
     rewards: RewardsCfg = MathTeleopRewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
-    # curriculum: CurriculumCfg = MathCurriculumCfg()
-    curriculum: CurriculumCfg = MathAdaptiveCurriculumCfg()
+    curriculum: CurriculumCfg = MathCurriculumCfg()
+    #curriculum: CurriculumCfg = MathAdaptiveCurriculumCfg()
     # added
     adaptive_state: MathAdaptiveCurriculum = MathAdaptiveCurriculum()
     
@@ -1234,7 +1533,7 @@ class MathTeleopLocomotionVelocityRoughEnvCfg(MathTeleopManagerBasedRLEnvCfg):
 
         """Post initialization."""
         # general settings
-        self.decimation = 4 # For instance, if the simulation dt is 0.01s and the policy dt is 0.1s, then the decimation is 10. This means that the control action is updated every 10 simulation steps.
+        self.decimation = 4 # For instance, if the simulation dt is 0.01s and the policy dt is 0.1s, then the decimation is 10. This means that the control action i10 simulation steps.
         self.episode_length_s = 40.0
         # simulation settings
         self.sim.dt =  0.005

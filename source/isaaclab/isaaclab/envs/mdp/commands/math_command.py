@@ -134,8 +134,8 @@ class BernoulliMaskCommand(CommandTerm):
         pass  # метрик нет
 
     def _current_threshold(self) -> float:
-        # пробуем взять порог из env (для куррикуума), иначе fallback на cfg.p_one
-        return float(getattr(self._env, "MASK_PROB_LEVEL", getattr(self.cfg, "p_one", 0.5)))
+        
+        return float(getattr(self.cfg, "p_one", 0.5))
 
     def _resample_command(self, env_ids: Sequence[int]):
         """Генерация только при reset(env_ids)."""
